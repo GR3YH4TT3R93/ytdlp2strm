@@ -243,7 +243,7 @@ async fn run_scan_inner(
         let safe_title = sanitize_filename(&entry.title);
 
         // --- STRM ---
-        let new_strm_path = channel_dir.join(format!("{safe_title} [{}].strm", entry.id));
+        let new_strm_path = channel_dir.join(format!("{safe_title}.strm"));
         let strm_fresh = if force {
             false
         } else if let Some(existing_path) = existing.strms.get(&entry.id) {
@@ -289,7 +289,7 @@ async fn run_scan_inner(
                     thumb_filename = p.file_name().map(|n| n.to_string_lossy().to_string());
                 }
             } else if let Some(url) = &entry.thumbnail_url {
-                let base_path = channel_dir.join(format!("{safe_title} [{}]-thumb", entry.id));
+                let base_path = channel_dir.join(format!("{safe_title}-thumb"));
                 match download_image(&state.http, url, &base_path).await {
                     Ok(final_path) => {
                         thumb_written += 1;
@@ -317,7 +317,7 @@ async fn run_scan_inner(
 
         // --- NFO (after thumbnail) ---
         if cfg.metadata.write_nfo {
-            let new_nfo_path = channel_dir.join(format!("{safe_title} [{}].nfo", entry.id));
+            let new_nfo_path = channel_dir.join(format!("{safe_title}.nfo"));
             let nfo_fresh = if force || thumb_changed {
                 false
             } else if let Some(existing_nfo) = existing.nfos.get(&entry.id) {
@@ -424,7 +424,7 @@ pub struct ScanRequest {
 }
 
 const DEFAULT_SCAN_LIMIT: usize = 100;
-const MAX_SCAN_LIMIT: usize = 1000;
+const MAX_SCAN_LIMIT: usize = 10_000_000;
 
 type ScanError = (StatusCode, Json<Value>);
 
@@ -440,7 +440,7 @@ pub async fn scan_channel(
     if limit == 0 || limit > MAX_SCAN_LIMIT {
         return Err(scan_err(
             StatusCode::BAD_REQUEST,
-            format!("limit must be 1..={MAX_SCAN_LIMIT}"),
+            format!("limit must be between 1 and {MAX_SCAN_LIMIT}"),
         ));
     }
     let mode = req.mode.unwrap_or_else(|| state.config().strm.mode);
@@ -482,7 +482,7 @@ pub async fn scan_background(
     if limit == 0 || limit > MAX_SCAN_LIMIT {
         return Err(scan_err(
             StatusCode::BAD_REQUEST,
-            format!("limit must be 1..={MAX_SCAN_LIMIT}"),
+            format!("limit must be between 1 and {MAX_SCAN_LIMIT}"),
         ));
     }
     let mode = req.mode.unwrap_or_else(|| state.config().strm.mode);

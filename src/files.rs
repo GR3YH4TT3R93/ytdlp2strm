@@ -12,13 +12,13 @@ pub enum StrmOutcome {
 
 pub async fn write_strm_file(
     dir: &Path,
-    video_id: &str,
+    _video_id: &str,
     title: &str,
     play_url: &str,
     force: bool,
 ) -> std::io::Result<StrmOutcome> {
     let safe_title = sanitize_filename(title);
-    let filename = format!("{safe_title} [{video_id}].strm");
+    let filename = format!("{safe_title}.strm");
     let path = dir.join(filename);
 
     if !force && fs::metadata(&path).await.is_ok() {
@@ -37,16 +37,6 @@ pub struct ExistingFiles {
     pub thumbs: HashMap<String, PathBuf>,
 }
 
-fn extract_id(stem: &str) -> Option<String> {
-    let open = stem.rfind(" [")?;
-    let close = stem.rfind(']')?;
-    if close > open + 2 {
-        Some(stem[open + 2..close].to_string())
-    } else {
-        None
-    }
-}
-
 pub async fn scan_existing_files(dir: &Path) -> ExistingFiles {
     let mut result = ExistingFiles::default();
     let mut rd = match fs::read_dir(dir).await {
@@ -59,22 +49,29 @@ pub async fn scan_existing_files(dir: &Path) -> ExistingFiles {
             continue;
         };
         if let Some(stem) = name.strip_suffix(".strm") {
-            if let Some(id) = extract_id(stem) {
-                result.strms.insert(id, path);
-            }
-        } else if let Some(stem) = name.strip_suffix(".nfo") {
-            if name != "tvshow.nfo" {
-                if let Some(id) = extract_id(stem) {
-                    result.nfos.insert(id, path);
-                }
-            }
-        } else {
-            for ext in IMAGE_EXTS {
-                if let Some(stem) = name.strip_suffix(&format!("-thumb.{ext}")) {
-                    if let Some(id) = extract_id(stem) {
-                        result.thumbs.insert(id, path);
+            // Read the .strm file to extract the video ID from the URL
+            if let Ok(content) = fs::read_to_string(&path).await {
+                let content = content.trim();
+                if let Some(id) = content.split('/').last() {
+                    if !id.is_empty() {
+                        let id = id.to_string();
+                        result.strms.insert(id.clone(), path);
+
+                        // Look for matching NFO
+                        let nfo_path = dir.join(format!("{stem}.nfo"));
+                        if nfo_path.exists() {
+                            result.nfos.insert(id.clone(), nfo_path);
+                        }
+
+                        // Look for matching Thumbnail
+                        for ext in IMAGE_EXTS {
+                            let thumb_path = dir.join(format!("{stem}-thumb.{ext}"));
+                            if thumb_path.exists() {
+                                result.thumbs.insert(id.clone(), thumb_path);
+                                break;
+                            }
+                        }
                     }
-                    break;
                 }
             }
         }

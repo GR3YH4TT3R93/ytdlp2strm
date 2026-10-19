@@ -248,9 +248,9 @@ strm/
 ├── Marques Brownlee/
 │   ├── poster.webp
 │   ├── tvshow.nfo
-│   ├── AirPods Pro 3 Review [GB0b6KFZVq0].strm
-│   ├── AirPods Pro 3 Review [GB0b6KFZVq0].nfo
-│   ├── AirPods Pro 3 Review [GB0b6KFZVq0]-thumb.webp
+│   ├── AirPods Pro 3 Review.strm
+│   ├── AirPods Pro 3 Review.nfo
+│   ├── AirPods Pro 3 Review-thumb.webp
 │   └── ...
 └── The Marxist Project/
     ├── poster.jpg

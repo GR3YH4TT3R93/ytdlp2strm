@@ -188,7 +188,6 @@ pub async fn save_config_api(
     })))
 }
 
-/// Appends a source to the schedule in config.toml without destroying comments.
 pub async fn add_schedule_source(
     state: &AppState,
     url: &str,
@@ -196,7 +195,7 @@ pub async fn add_schedule_source(
 ) -> anyhow::Result<bool> {
     let mut current_config = state.config();
     if current_config.schedule.sources.iter().any(|s| s.url == url) {
-        return Ok(false); // Already exists
+        return Ok(false);
     }
 
     current_config
@@ -357,7 +356,7 @@ pub async fn strm_generate(
     let mut thumb_path: Option<std::path::PathBuf> = None;
     if state.config().metadata.write_thumbnails {
         if let Some(url) = json.get("thumbnail").and_then(|v| v.as_str()) {
-            let base_path = dir.join(format!("{safe_title} [{video_id}]-thumb"));
+            let base_path = dir.join(format!("{safe_title}-thumb"));
             match download_image(&state.http, url, &base_path).await {
                 Ok(p) => {
                     state
@@ -378,7 +377,7 @@ pub async fn strm_generate(
     let mut nfo_path: Option<std::path::PathBuf> = None;
     if state.config().metadata.write_nfo {
         let nfo_content = build_episode_nfo(&meta, 1, 1, &video_id, thumb_filename.as_deref());
-        let path = dir.join(format!("{safe_title} [{video_id}].nfo"));
+        let path = dir.join(format!("{safe_title}.nfo"));
         tokio::fs::write(&path, nfo_content)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("write nfo: {e}")))?;
