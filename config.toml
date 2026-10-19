@@ -5,8 +5,8 @@
 address = "127.0.0.1:8080"
 
 [auth]
-username = "u"
-password = "p"
+username = "admin"
+password = "password"
 
 [sponsorblock]
 enabled = true
@@ -50,6 +50,13 @@ metadata_level = "full"
 [state]
 schedule_file = "./state/schedule.json"
 
+[deps]
+# Where to store the portable yt-dlp and ffmpeg binaries.
+bin_dir = "./bin"
+# If true, automatically downloads the correct binaries on startup if missing.
+# Set to false to use system-installed binaries instead.
+auto_download = true
+
 [schedule]
 # Cron expression for automatic library refresh.
 # Accepts standard 5-field crontab syntax (min hour dom month dow)
@@ -59,14 +66,10 @@ refresh_cron = "0 */6 * * *"
 # Stagger scans so a large library doesn't start all at once.
 per_source_delay_seconds = 5
 
-[[schedule.sources]]
-url = "https://www.youtube.com/@mkbhd"
-limit = 50
-
-[[schedule.sources]]
-url = "https://youtube.com/playlist?list=PLuzqoNvqVKyfYdqy9uvfzVImNTP-kpbO1"
-limit = 50
-
-# Multiple sources pointing at the same channel/playlist are allowed
-# but wasteful — deduplication happens by URL string, not by resolved
-# channel name.
+# Add sources to keep refreshed. Each entry is scanned on every cron tick.
+# URLs can be channels (https://www.youtube.com/@handle) or playlists.
+# Uncomment and add your own sources below.
+sources = [
+    { url = "https://www.youtube.com/@mkbhd", limit = 50 },
+    { url = "https://youtube.com/playlist?list=PLuzqoNvqVKyfYdqy9uvfzVImNTP-kpbO1", limit = 50 },
+]

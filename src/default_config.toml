@@ -1,0 +1,78 @@
+[server]
+# Two accepted forms:
+#   address = "127.0.0.1:8080"                 # binds there, base_url = http://127.0.0.1:8080
+#   address = "https://ytdlp.example.com"      # binds 0.0.0.0:8080, base_url = https://ytdlp.example.com
+address = "127.0.0.1:8080"
+
+[auth]
+# Empty username disables auth.
+# When set, admin routes require HTTP Basic auth.
+# Always deploy behind HTTPS if exposing this to the internet.
+username = ""
+password = ""
+
+[sponsorblock]
+enabled = true
+# "all", "default", "none", or a comma-separated list of categories
+remove = "default"
+
+[youtube]
+extra_args = []
+
+[strm]
+# Where .strm files are written. Created on first use.
+output_dir = "./strm"
+# output_dir = "/mnt/media/library/youtube"
+# "stream" → STRM files point at /play/{id} — HLS bridge, SponsorBlock-filtered,
+#            no disk usage, instant play, requires HLS-capable client.
+# "download" → STRM files point at /download/{id} — yt-dlp downloads with
+#              SponsorBlock removal, cached to disk, plays in any client.
+mode = "stream"
+
+[downloads]
+output_dir = "./downloads"
+# Delete cached downloads older than N days (0 = keep forever).
+retention_days = 30
+# When a download-mode scan runs, also pre-fetch videos in the background.
+# false = scans are fast; first play of each video waits for download.
+# true  = scans return immediately but trigger background downloads
+#         (up to `concurrency` at a time). Recommended for download mode.
+pre_download = false
+# Max concurrent yt-dlp download processes.
+concurrency = 3
+
+[metadata]
+# Write NFO sidecar files for channels (tvshow.nfo) and videos (episodenames.nfo)
+write_nfo = true
+# Download channel avatar as poster.jpg and video thumbnails as <name>-thumb.jpg
+write_thumbnails = true
+# "basic": flat-playlist data only (title, duration) — fast scans
+# "full": resolve each video for description + upload date — richer NFO, slower
+metadata_level = "full"
+
+[state]
+schedule_file = "./state/schedule.json"
+
+[deps]
+# Where to store the portable yt-dlp and ffmpeg binaries.
+bin_dir = "./bin"
+# If true, automatically downloads the correct binaries on startup if missing.
+# Set to false to use system-installed binaries instead.
+auto_download = true
+
+[schedule]
+# Cron expression for automatic library refresh.
+# Accepts standard 5-field crontab syntax (min hour dom month dow)
+# or 6-field Quartz syntax (sec min hour dom month dow).
+# Set to "" to disable.
+refresh_cron = "0 */6 * * *"
+# Stagger scans so a large library doesn't start all at once.
+per_source_delay_seconds = 5
+
+# Add sources to keep refreshed. Each entry is scanned on every cron tick.
+# URLs can be channels (https://www.youtube.com/@handle) or playlists.
+# Uncomment and add your own sources below.
+sources = [
+    # { url = "https://www.youtube.com/@mkbhd", limit = 50 },
+    # { url = "https://youtube.com/playlist?list=PLuzqoNvqVKyfYdqy9uvfzVImNTP-kpbO1", limit = 50 },
+]

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::{Json, extract::State};
+use axum::extract::State;
 use serde_json::Value;
 use tokio::sync::Semaphore;
 

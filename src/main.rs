@@ -1,6 +1,7 @@
 mod auth;
 mod bridge;
 mod config;
+mod deps;
 mod downloads;
 mod files;
 mod handlers;
@@ -14,6 +15,7 @@ mod state;
 mod ytdlp;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,11 +25,11 @@ use axum::{
     routing::{get, post},
 };
 use clap::Parser;
+use directories::ProjectDirs;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
 use crate::config::AppConfig;
-use crate::schedule::load_schedule_status;
 use crate::sponsorblock::SponsorBlock;
 use crate::state::{AppState, Metrics, ResolveCache};
 use crate::ytdlp::Ytdlp;
@@ -35,8 +37,61 @@ use crate::ytdlp::Ytdlp;
 #[derive(Parser, Debug)]
 #[command(version, about = "yt-dlp to STRM bridge server")]
 struct Cli {
-    #[arg(short, long, default_value = "config.toml")]
-    config: std::path::PathBuf,
+    /// Path to the TOML config file.
+    /// Overrides standard system/user/portable resolution.
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+}
+
+fn resolve_paths(cli_config: Option<PathBuf>) -> (PathBuf, PathBuf) {
+    // 1. Explicit CLI Argument
+    if let Some(p) = cli_config {
+        let abs_p = std::path::absolute(&p).unwrap_or(p.clone());
+        let parent = abs_p
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf();
+        return (abs_p, parent);
+    }
+
+    // 2. Local / Portable (Current Working Directory)
+    let cwd_cfg = PathBuf::from("config.toml");
+    if cwd_cfg.exists() {
+        return (cwd_cfg, PathBuf::from("."));
+    }
+
+    let proj_dirs = ProjectDirs::from("", "", "ytdlp2strm");
+
+    // 3. User Config (XDG)
+    if let Some(proj) = &proj_dirs {
+        let xdg_cfg = proj.config_dir().join("config.toml");
+        if xdg_cfg.exists() {
+            return (xdg_cfg, proj.data_dir().to_path_buf());
+        }
+    }
+
+    // 4. System-wide POSIX Config
+    let etc_cfg = PathBuf::from("/etc/ytdlp2strm/config.toml");
+    if etc_cfg.exists() {
+        return (etc_cfg, PathBuf::from("/var/lib/ytdlp2strm"));
+    }
+
+    // 5. No config exists anywhere. Generate standard defaults based on user privileges.
+    #[cfg(unix)]
+    let is_root = unsafe { libc::geteuid() == 0 };
+    #[cfg(not(unix))]
+    let is_root = false;
+
+    if is_root {
+        // Generate System-wide (e.g. for a systemd service)
+        (
+            PathBuf::from("/etc/ytdlp2strm/config.toml"),
+            PathBuf::from("/var/lib/ytdlp2strm"),
+        )
+    } else {
+        // Generate Local/Portable (e.g. user just ran the downloaded binary)
+        (PathBuf::from("config.toml"), PathBuf::from("."))
+    }
 }
 
 #[tokio::main]
@@ -48,11 +103,51 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let (config_path, data_dir) = resolve_paths(cli.config);
 
-    let raw = std::fs::read_to_string(&cli.config)
-        .with_context(|| format!("reading config at {}", cli.config.display()))?;
+    // Ensure data directory exists and change into it so relative paths (./strm, ./bin) resolve correctly.
+    if let Err(e) = std::fs::create_dir_all(&data_dir) {
+        eprintln!(
+            "Warning: could not create data directory at {}: {e}",
+            data_dir.display()
+        );
+    } else if let Err(e) = std::env::set_current_dir(&data_dir) {
+        eprintln!(
+            "Warning: could not change working directory to {}: {e}",
+            data_dir.display()
+        );
+    }
+
+    // Generate default config if missing
+    if !config_path.exists() {
+        println!("Configuration file not found at: {}", config_path.display());
+        println!("Generating a default configuration template...");
+
+        let default_config = include_str!("default_config.toml");
+
+        if let Some(parent) = config_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        if let Err(e) = std::fs::write(&config_path, default_config) {
+            eprintln!("Failed to write default config: {e}");
+            return Ok(());
+        }
+
+        println!("✅ Created {}.", config_path.display());
+        println!("👉 Please edit this file to set your auth and preferences, then restart.");
+        return Ok(());
+    }
+
+    // Load the config
+    let raw = std::fs::read_to_string(&config_path)
+        .with_context(|| format!("reading config at {}", config_path.display()))?;
     let config: AppConfig = toml::from_str(&raw)
-        .with_context(|| format!("parsing config at {}", cli.config.display()))?;
+        .with_context(|| format!("parsing config at {}", config_path.display()))?;
+
+    // Ensure Dependencies (yt-dlp, ffmpeg)
+    let deps = deps::ensure_binaries(&config.deps.bin_dir, config.deps.auto_download).await?;
+    let yt_extra_args = config.youtube.extra_args.clone();
 
     let bind = config.server.address.bind_addr();
     let base_url = config.server.address.base_url();
@@ -108,17 +203,12 @@ async fn main() -> anyhow::Result<()> {
         "downloads configured"
     );
 
-    let yt_extra_args = config.youtube.extra_args.clone();
-    if !yt_extra_args.is_empty() {
-        tracing::info!(args = ?yt_extra_args, "yt-dlp extra args configured");
-    }
-
     let schedule_status_path = config.state.schedule_file.clone();
-    let schedule_status = load_schedule_status(&schedule_status_path).await;
+    let schedule_status = schedule::load_schedule_status(&schedule_status_path).await;
 
     let state = AppState {
         config: Arc::new(config),
-        ytdlp: Ytdlp::from_path_with_args(yt_extra_args),
+        ytdlp: Ytdlp::from_path_with_args(deps.yt_dlp_binary, deps.bin_dir, yt_extra_args),
         http,
         sponsorblock,
         resolve_cache: ResolveCache::new(),

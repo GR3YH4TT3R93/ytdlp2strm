@@ -21,7 +21,30 @@ pub struct AppConfig {
     #[serde(default)]
     pub state: StateConfig,
     #[serde(default)]
+    pub deps: DepsConfig,
+    #[serde(default)]
     pub schedule: ScheduleConfig,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DepsConfig {
+    #[serde(default = "default_bin_dir")]
+    pub bin_dir: PathBuf,
+    #[serde(default = "default_true")]
+    pub auto_download: bool,
+}
+
+fn default_bin_dir() -> PathBuf {
+    PathBuf::from("./bin")
+}
+
+impl Default for DepsConfig {
+    fn default() -> Self {
+        Self {
+            bin_dir: default_bin_dir(),
+            auto_download: true,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -6,10 +6,12 @@ use tokio::process::Command;
 
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
 const LIST_TIMEOUT: Duration = Duration::from_secs(120);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone)]
 pub struct Ytdlp {
     binary: PathBuf,
+    bin_dir: PathBuf,
     extra_args: Vec<String>,
 }
 
@@ -32,29 +34,43 @@ pub struct ChannelInfo {
     pub entries: Vec<ChannelEntry>,
 }
 
+pub struct DownloadOptions<'a> {
+    /// Output template, e.g. `<dir>/%(id)s.%(ext)s`.
+    pub output_template: &'a Path,
+    /// SponsorBlock categories to physically remove. Empty = no removal.
+    pub sponsorblock_categories: &'a [String],
+    pub sponsorblock_api: Option<&'a str>,
+}
+
 impl Ytdlp {
-    pub fn new(binary: impl Into<PathBuf>) -> Self {
+    pub fn from_path_with_args(binary: PathBuf, bin_dir: PathBuf, extra_args: Vec<String>) -> Self {
         Self {
-            binary: binary.into(),
-            extra_args: Vec::new(),
+            binary,
+            bin_dir,
+            extra_args,
         }
     }
 
-    /// Build with user-supplied extra args (from `[youtube] extra_args`).
-    pub fn from_path_with_args(extra_args: Vec<String>) -> Self {
-        let mut ytdlp = Self::new("yt-dlp");
-        ytdlp.extra_args = extra_args;
-        ytdlp
-    }
+    /// Injects the local bin directory into the subprocess PATH so that
+    /// yt-dlp automatically finds our portable ffmpeg.
+    fn configure_command(&self, cmd: &mut Command) {
+        if !self.bin_dir.as_os_str().is_empty() {
+            let path_var = std::env::var_os("PATH").unwrap_or_default();
+            let mut paths = std::env::split_paths(&path_var).collect::<Vec<_>>();
+            // Prepend our local bin dir
+            paths.insert(0, self.bin_dir.clone());
 
-    #[allow(dead_code)]
-    pub fn binary(&self) -> &Path {
-        &self.binary
+            if let Ok(new_path) = std::env::join_paths(paths) {
+                cmd.env("PATH", new_path);
+            }
+        }
     }
 
     /// Resolve a URL to yt-dlp's full JSON metadata (`yt-dlp -J`).
     pub async fn resolve(&self, url: &str) -> Result<Value> {
         let mut cmd = Command::new(&self.binary);
+        self.configure_command(&mut cmd);
+
         cmd.arg("-J")
             .arg("--no-warnings")
             .arg("--no-playlist")
@@ -65,7 +81,7 @@ impl Ytdlp {
         let output = tokio::time::timeout(RESOLVE_TIMEOUT, cmd.output())
             .await
             .context("yt-dlp resolve timed out")?
-            .context("failed to spawn yt-dlp — is it installed and on $PATH?")?;
+            .context("failed to spawn yt-dlp")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -80,6 +96,8 @@ impl Ytdlp {
     /// Fetch the format-specific media playlist URL for a given format ID.
     pub async fn stream_url(&self, format_id: &str, video_url: &str) -> Result<String> {
         let mut cmd = Command::new(&self.binary);
+        self.configure_command(&mut cmd);
+
         cmd.arg("-g")
             .arg("-f")
             .arg(format_id)
@@ -122,6 +140,8 @@ impl Ytdlp {
         let normalized = normalize_playlist_url(channel_url);
 
         let mut cmd = Command::new(&self.binary);
+        self.configure_command(&mut cmd);
+
         cmd.arg("-J")
             .arg("--flat-playlist")
             .arg("--playlist-end")
@@ -204,6 +224,7 @@ impl Ytdlp {
                             .get("description")
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string());
+
                         Some(ChannelEntry {
                             id,
                             title,
@@ -225,13 +246,78 @@ impl Ytdlp {
             entries,
         })
     }
+
+    /// Download a video with yt-dlp, applying SponsorBlock removal if
+    /// categories are provided. Requires ffmpeg on PATH for the merge and
+    /// for the SB re-mux. Returns the final file path.
+    pub async fn download_video(
+        &self,
+        video_id: &str,
+        opts: DownloadOptions<'_>,
+    ) -> Result<PathBuf> {
+        let url = format!("https://www.youtube.com/watch?v={video_id}");
+
+        let mut cmd = Command::new(&self.binary);
+        self.configure_command(&mut cmd);
+
+        cmd.arg("-f")
+            .arg("bv*[ext=mp4]+ba[ext=m4a]/bv*[vcodec^=avc1]+ba/bv*+ba/b")
+            .arg("--merge-output-format")
+            .arg("mp4")
+            .arg("--no-warnings")
+            .arg("--no-playlist")
+            .arg("--no-progress")
+            .arg("--newline")
+            .arg("--print")
+            .arg("after_move:filepath")
+            .arg("-o")
+            .arg(opts.output_template);
+
+        if !opts.sponsorblock_categories.is_empty() {
+            cmd.arg("--sponsorblock-remove")
+                .arg(opts.sponsorblock_categories.join(","));
+            if let Some(api) = opts.sponsorblock_api {
+                cmd.arg("--sponsorblock-api").arg(api);
+            }
+        }
+
+        cmd.args(&self.extra_args);
+        cmd.arg("--").arg(&url);
+
+        // Downloads can take several minutes for long videos.
+        let output = tokio::time::timeout(DOWNLOAD_TIMEOUT, cmd.output())
+            .await
+            .context("yt-dlp download timed out")?
+            .context("failed to spawn yt-dlp")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "yt-dlp download failed (exit {}): {}",
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        let path = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty() && l.trim().contains(std::path::MAIN_SEPARATOR))
+            .map(|s| PathBuf::from(s.trim()))
+            .ok_or_else(|| anyhow::anyhow!("yt-dlp did not print a final output path"))?;
+
+        if !path.exists() {
+            bail!(
+                "yt-dlp reported output at {} but no file exists there",
+                path.display()
+            );
+        }
+
+        Ok(path)
+    }
 }
 
 /// Pick the highest-resolution thumbnail from a yt-dlp `thumbnails` array.
-/// Pick the highest-resolution thumbnail from a yt-dlp `thumbnails` array.
-/// Format is not considered — WebP, JPEG, and PNG are all supported by
-/// Jellyfin/Kodi/Emby/Plex. The download step sniffs actual bytes and
-/// names the file accordingly.
 fn best_thumbnail(thumbnails: &[Value]) -> Option<String> {
     let mut best: Option<(&Value, (u64, i64))> = None;
     for t in thumbnails {
@@ -279,85 +365,6 @@ fn normalize_playlist_url(url: &str) -> String {
     let base = url.trim_end_matches('/');
     let base = base.split('?').next().unwrap_or(base);
     format!("{base}/videos")
-}
-
-pub struct DownloadOptions<'a> {
-    /// Output template, e.g. `<dir>/%(id)s.%(ext)s`.
-    pub output_template: &'a std::path::Path,
-    /// SponsorBlock categories to physically remove. Empty = no removal.
-    pub sponsorblock_categories: &'a [String],
-    pub sponsorblock_api: Option<&'a str>,
-}
-
-impl Ytdlp {
-    // ... existing methods (new, from_path_with_args, resolve, stream_url, list_channel) ...
-
-    /// Download a video with yt-dlp, applying SponsorBlock removal if
-    /// categories are provided. Requires ffmpeg on PATH for the merge and
-    /// for the SB re-mux. Returns the final file path.
-    pub async fn download_video(
-        &self,
-        video_id: &str,
-        opts: DownloadOptions<'_>,
-    ) -> Result<PathBuf> {
-        let url = format!("https://www.youtube.com/watch?v={video_id}");
-
-        let mut cmd = Command::new(&self.binary);
-        cmd.arg("-f")
-            .arg("bv*[ext=mp4]+ba[ext=m4a]/bv*[vcodec^=avc1]+ba/bv*+ba/b")
-            .arg("--merge-output-format")
-            .arg("mp4")
-            .arg("--no-warnings")
-            .arg("--no-playlist")
-            .arg("--no-progress")
-            .arg("--newline")
-            .arg("--print")
-            .arg("after_move:filepath")
-            .arg("-o")
-            .arg(opts.output_template);
-
-        if !opts.sponsorblock_categories.is_empty() {
-            cmd.arg("--sponsorblock-remove")
-                .arg(opts.sponsorblock_categories.join(","));
-            if let Some(api) = opts.sponsorblock_api {
-                cmd.arg("--sponsorblock-api").arg(api);
-            }
-        }
-
-        cmd.args(&self.extra_args);
-        cmd.arg("--").arg(&url);
-
-        // Downloads can take several minutes for long videos.
-        let output = tokio::time::timeout(Duration::from_secs(3600), cmd.output())
-            .await
-            .context("yt-dlp download timed out (1h)")?
-            .context("failed to spawn yt-dlp")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "yt-dlp download failed (exit {}): {}",
-                output.status,
-                stderr.trim()
-            );
-        }
-
-        let path = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty() && l.trim().contains(std::path::MAIN_SEPARATOR))
-            .map(|s| PathBuf::from(s.trim()))
-            .ok_or_else(|| anyhow::anyhow!("yt-dlp did not print a final output path"))?;
-
-        if !path.exists() {
-            bail!(
-                "yt-dlp reported output at {} but no file exists there",
-                path.display()
-            );
-        }
-
-        Ok(path)
-    }
 }
 
 #[cfg(test)]
