@@ -14,12 +14,41 @@ enabled = true
 remove = "default"
 
 [youtube]
-extra_args = ["--verbose"]
+extra_args = []
 
 [strm]
 # Where .strm files are written. Created on first use.
 output_dir = "./strm"
 # output_dir = "/mnt/media/library/youtube"
+# "stream" → STRM files point at /play/{id} — HLS bridge, SponsorBlock-filtered,
+#            no disk usage, instant play, requires HLS-capable client.
+# "download" → STRM files point at /download/{id} — yt-dlp downloads with
+#              SponsorBlock removal, cached to disk, plays in any client.
+mode = "stream"
+
+[downloads]
+output_dir = "./downloads"
+# Delete cached downloads older than N days (0 = keep forever).
+retention_days = 30
+# When a download-mode scan runs, also pre-fetch videos in the background.
+# false = scans are fast; first play of each video waits for download.
+# true  = scans return immediately but trigger background downloads
+#         (up to `concurrency` at a time). Recommended for download mode.
+pre_download = false
+# Max concurrent yt-dlp download processes.
+concurrency = 3
+
+[metadata]
+# Write NFO sidecar files for channels (tvshow.nfo) and videos (episodenames.nfo)
+write_nfo = true
+# Download channel avatar as poster.jpg and video thumbnails as <name>-thumb.jpg
+write_thumbnails = true
+# "basic": flat-playlist data only (title, duration) — fast scans
+# "full": resolve each video for description + upload date — richer NFO, slower
+metadata_level = "full"
+
+[state]
+schedule_file = "./state/schedule.json"
 
 [schedule]
 # Cron expression for automatic library refresh.

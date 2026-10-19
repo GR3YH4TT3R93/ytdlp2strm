@@ -15,6 +15,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub strm: StrmConfig,
     #[serde(default)]
+    pub downloads: DownloadsConfig,
+    #[serde(default)]
+    pub metadata: MetadataConfig,
+    #[serde(default)]
     pub state: StateConfig,
     #[serde(default)]
     pub schedule: ScheduleConfig,
@@ -69,10 +73,29 @@ pub struct YouTubeConfig {
     pub extra_args: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StrmMode {
+    #[default]
+    Stream,
+    Download,
+}
+
+impl std::fmt::Display for StrmMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StrmMode::Stream => f.write_str("stream"),
+            StrmMode::Download => f.write_str("download"),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct StrmConfig {
     #[serde(default = "default_strm_dir")]
     pub output_dir: PathBuf,
+    #[serde(default)]
+    pub mode: StrmMode,
 }
 
 fn default_strm_dir() -> PathBuf {
@@ -83,6 +106,74 @@ impl Default for StrmConfig {
     fn default() -> Self {
         Self {
             output_dir: default_strm_dir(),
+            mode: StrmMode::Stream,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DownloadsConfig {
+    #[serde(default = "default_downloads_dir")]
+    pub output_dir: PathBuf,
+    #[serde(default = "default_retention_days")]
+    pub retention_days: u64,
+    #[serde(default)]
+    pub pre_download: bool,
+    #[serde(default = "default_concurrency")]
+    pub concurrency: usize,
+}
+
+fn default_downloads_dir() -> PathBuf {
+    PathBuf::from("./downloads")
+}
+
+fn default_retention_days() -> u64 {
+    30
+}
+
+fn default_concurrency() -> usize {
+    3
+}
+
+impl Default for DownloadsConfig {
+    fn default() -> Self {
+        Self {
+            output_dir: default_downloads_dir(),
+            retention_days: default_retention_days(),
+            pre_download: false,
+            concurrency: default_concurrency(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MetadataLevel {
+    Basic,
+    #[default]
+    Full,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MetadataConfig {
+    #[serde(default = "default_true")]
+    pub write_nfo: bool,
+    #[serde(default = "default_true")]
+    pub write_thumbnails: bool,
+    #[serde(default)]
+    pub metadata_level: MetadataLevel,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for MetadataConfig {
+    fn default() -> Self {
+        Self {
+            write_nfo: true,
+            write_thumbnails: true,
+            metadata_level: MetadataLevel::Full,
         }
     }
 }
