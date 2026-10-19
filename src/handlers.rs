@@ -136,40 +136,7 @@ pub async fn save_config_api(
 
     let old_config = state.config();
 
-    if old_config.strm.output_dir != new_config.strm.output_dir {
-        crate::files::move_directory(&old_config.strm.output_dir, &new_config.strm.output_dir)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to move strm dir: {e}"),
-                )
-            })?;
-    }
-    if old_config.downloads.output_dir != new_config.downloads.output_dir {
-        crate::files::move_directory(
-            &old_config.downloads.output_dir,
-            &new_config.downloads.output_dir,
-        )
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to move downloads dir: {e}"),
-            )
-        })?;
-    }
-    if old_config.deps.bin_dir != new_config.deps.bin_dir {
-        crate::files::move_directory(&old_config.deps.bin_dir, &new_config.deps.bin_dir)
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to move bin dir: {e}"),
-                )
-            })?;
-    }
-
+    // 1. Write to disk and update memory IMMEDIATELY
     if let Err(e) = tokio::fs::write(path, &toml_out).await {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -177,10 +144,45 @@ pub async fn save_config_api(
         ));
     }
 
-    *state.config.write().unwrap() = new_config;
+    *state.config.write().unwrap() = new_config.clone();
 
     tracing::info!("configuration updated and applied via web UI");
 
+    // 2. Spawn the potentially hanging directory moves safely in the background
+    if old_config.strm.output_dir != new_config.strm.output_dir {
+        let from = old_config.strm.output_dir.clone();
+        let to = new_config.strm.output_dir.clone();
+        tokio::spawn(async move {
+            tracing::info!(from = %from.display(), to = %to.display(), "moving strm dir in background...");
+            if let Err(e) = crate::files::move_directory(&from, &to).await {
+                tracing::error!("Failed to move strm dir: {e}");
+            }
+        });
+    }
+
+    if old_config.downloads.output_dir != new_config.downloads.output_dir {
+        let from = old_config.downloads.output_dir.clone();
+        let to = new_config.downloads.output_dir.clone();
+        tokio::spawn(async move {
+            tracing::info!(from = %from.display(), to = %to.display(), "moving downloads dir in background...");
+            if let Err(e) = crate::files::move_directory(&from, &to).await {
+                tracing::error!("Failed to move downloads dir: {e}");
+            }
+        });
+    }
+
+    if old_config.deps.bin_dir != new_config.deps.bin_dir {
+        let from = old_config.deps.bin_dir.clone();
+        let to = new_config.deps.bin_dir.clone();
+        tokio::spawn(async move {
+            tracing::info!(from = %from.display(), to = %to.display(), "moving bin dir in background...");
+            if let Err(e) = crate::files::move_directory(&from, &to).await {
+                tracing::error!("Failed to move bin dir: {e}");
+            }
+        });
+    }
+
+    // 3. Return success to the browser instantly
     Ok(Json(json!({
         "status": "ok",
         "message": "Configuration applied immediately.",

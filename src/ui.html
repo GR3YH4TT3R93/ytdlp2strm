@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ytdlp2strm</title>
     <style>
-        /* ... (Keep all CSS exactly as provided in the previous message) ... */
         :root {
             --bg-base: #0f172a;
             --bg-panel: #1e293b;
@@ -95,7 +94,6 @@
 
         .panel-body { padding: 1rem; display: flex; flex-direction: column; flex: 1; overflow-y: auto; }
 
-        /* Form Styles */
         .form-section { margin-bottom: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 1.5rem; }
         .form-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
         .form-section h3 { font-size: 1rem; color: var(--accent); margin-bottom: 1rem; }
@@ -122,7 +120,6 @@
         .checkbox-group input { width: 1rem; height: 1rem; accent-color: var(--accent); }
         .checkbox-group label { margin-bottom: 0; cursor: pointer; }
 
-        /* Editor Styles */
         textarea {
             flex: 1;
             width: 100%;
@@ -153,7 +150,6 @@
         button.primary:hover { background-color: var(--accent-hover); }
         button.primary:disabled { opacity: 0.7; cursor: not-allowed; }
 
-        /* Status Box Styles */
         .status-box {
             background-color: var(--bg-input);
             padding: 1rem;
@@ -171,7 +167,6 @@
         .status-url { font-weight: 600; word-break: break-all; color: var(--accent); }
         .status-details { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }
 
-        /* Terminal Box */
         .terminal-box {
             background-color: #000;
             color: #4ade80;
@@ -180,7 +175,7 @@
             padding: 0.75rem;
             border-radius: 4px;
             border: 1px solid var(--border);
-            height: 200px;
+            height: 250px;
             overflow-y: auto;
             white-space: pre-wrap;
             word-break: break-all;
@@ -276,8 +271,7 @@
                         </div>
                         <div class="form-group">
                             <label>Binaries Dir</label>
-                            <small>Where portable yt-dlp and ffmpeg are stored
-                                if not present on PATH.</small>
+                            <small>Where portable yt-dlp and ffmpeg are stored.</small>
                             <input type="text" id="cfg_deps_bin_dir">
                         </div>
                     </div>
@@ -317,8 +311,7 @@
                         <div class="form-grid">
                             <div class="form-group">
                                 <label>Limit</label>
-                                <input type="number" id="scan-limit" value="50"
-                                min="1" max="10000000">
+                                <input type="number" id="scan-limit" value="50" min="1" max="10000000">
                             </div>
                             <div class="form-group">
                                 <label>Mode</label>
@@ -333,7 +326,6 @@
                             <input type="checkbox" id="scan-force">
                             <label for="scan-force">Force overwrite</label>
                         </div>
-                        <!-- New Checkbox -->
                         <div class="checkbox-group">
                             <input type="checkbox" id="scan-add-to-schedule">
                             <label for="scan-add-to-schedule">Add to Auto-Schedule</label>
@@ -383,7 +375,10 @@
         async function loadConfig() {
             try {
                 const res = await fetch('/api/config');
-                if (!res.ok) throw new Error(await res.text());
+                if (!res.ok) {
+                    const text = await res.text();
+                    throw new Error(text || res.statusText);
+                }
                 const data = await res.json();
 
                 fullConfig = data.json;
@@ -400,6 +395,7 @@
                 document.getElementById('cfg_strm_mode').value = fullConfig.strm.mode;
             } catch (e) {
                 showToast("Error loading config: " + e.message, true);
+                console.error("loadConfig error:", e);
             }
         }
 
@@ -432,7 +428,11 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-                const data = await res.json();
+
+                const text = await res.text();
+                let data = {};
+                try { data = JSON.parse(text); } catch (e) { data = { error: text }; }
+
                 if (!res.ok) throw new Error(data.error || "Save failed");
 
                 showToast("Config applied successfully!");
@@ -454,7 +454,7 @@
             btn.disabled = true;
             btn.textContent = "Scanning...";
             outputBox.style.display = 'block';
-            outputBox.textContent = "Starting scan...\n";
+            outputBox.textContent = "Connecting to server...\n";
 
             const url = document.getElementById('scan-url').value;
             const limit = parseInt(document.getElementById('scan-limit').value);
@@ -471,25 +471,38 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-                const data = await res.json();
-                if (!res.ok) throw new Error(data.error || "Scan failed to start");
 
-                showToast("Scan started in background");
+                const text = await res.text();
+                let data = {};
+                try { data = JSON.parse(text); } catch (e) { data = { error: text }; }
+
+                if (!res.ok) throw new Error(data.error || "Scan failed to start (HTTP " + res.status + ")");
+
+                outputBox.textContent += "Scan started in background...\n";
+                showToast("Scan started");
 
                 if (scanPollInterval) clearInterval(scanPollInterval);
                 scanPollInterval = setInterval(async () => {
-                    const logRes = await fetch('/scan/logs');
-                    const logData = await logRes.json();
+                    try {
+                        const logRes = await fetch('/scan/logs');
+                        const logData = await logRes.json();
 
-                    outputBox.textContent = logData.logs.join('\n');
-                    outputBox.scrollTop = outputBox.scrollHeight;
+                        outputBox.textContent = logData.logs.join('\n');
+                        outputBox.scrollTop = outputBox.scrollHeight;
 
-                    if (!logData.running) {
+                        if (!logData.running) {
+                            clearInterval(scanPollInterval);
+                            scanPollInterval = null;
+                            btn.disabled = false;
+                            btn.textContent = "Start Scan";
+                            showToast("Scan finished");
+                        }
+                    } catch (e) {
+                        outputBox.textContent += `\n[Connection Error: ${e.message}]`;
                         clearInterval(scanPollInterval);
                         scanPollInterval = null;
                         btn.disabled = false;
                         btn.textContent = "Start Scan";
-                        showToast("Scan finished");
                     }
                 }, 500);
 
