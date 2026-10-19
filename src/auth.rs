@@ -32,14 +32,11 @@ fn check_basic_auth(headers: &HeaderMap, username: &str, password: &str) -> bool
 }
 
 pub async fn basic_auth_mw(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    if !state.config.auth.is_enabled() {
+    let cfg = state.config(); // <--- ADDED
+    if !cfg.auth.is_enabled() {
         return next.run(req).await;
     }
-    if check_basic_auth(
-        req.headers(),
-        &state.config.auth.username,
-        &state.config.auth.password,
-    ) {
+    if check_basic_auth(req.headers(), &cfg.auth.username, &cfg.auth.password) {
         next.run(req).await
     } else {
         (

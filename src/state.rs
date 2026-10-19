@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
@@ -63,7 +63,7 @@ pub type VideoLocks = Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Arc<AppConfig>,
+    pub config: Arc<RwLock<AppConfig>>,
     pub ytdlp: Ytdlp,
     pub http: reqwest::Client,
     pub sponsorblock: SponsorBlock,
@@ -73,6 +73,15 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     pub video_locks: VideoLocks,
     pub download_sem: Arc<Semaphore>,
+    // New fields for live scan UI
+    pub scan_logs: Arc<Mutex<Vec<String>>>,
+    pub scan_running: Arc<Mutex<bool>>,
+}
+
+impl AppState {
+    pub fn config(&self) -> AppConfig {
+        self.config.read().unwrap().clone()
+    }
 }
 
 fn emit_metric(out: &mut String, name: &str, help: &str, value: u64) {

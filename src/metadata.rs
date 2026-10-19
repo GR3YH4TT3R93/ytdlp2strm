@@ -46,7 +46,8 @@ pub fn metadata_from_json(json: &Value) -> VideoMetadata {
 }
 
 pub async fn get_video_metadata(state: &AppState, entry: &ChannelEntry) -> VideoMetadata {
-    if state.config.metadata.metadata_level == MetadataLevel::Full {
+    let cfg = state.config();
+    if cfg.metadata.metadata_level == MetadataLevel::Full {
         match state
             .resolve_cache
             .get_or_resolve(&state.ytdlp, &entry.id)

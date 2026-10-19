@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ytdlp2strm</title>
+    <style>
+        /* ... (Keep all CSS exactly as provided in the previous message) ... */
+        :root {
+            --bg-base: #0f172a;
+            --bg-panel: #1e293b;
+            --bg-input: #0f172a;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --accent: #38bdf8;
+            --accent-hover: #0ea5e9;
+            --border: #334155;
+            --success: #10b981;
+            --error: #ef4444;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background-color: var(--bg-panel);
+            border-bottom: 1px solid var(--border);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        header h1 { font-size: 1.25rem; font-weight: 600; }
+        header nav a {
+            color: var(--text-muted);
+            text-decoration: none;
+            margin-left: 1.5rem;
+            font-size: 0.9rem;
+            transition: color 0.2s;
+        }
+        header nav a:hover { color: var(--accent); }
+
+        main {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            padding: 1.5rem;
+            gap: 1.5rem;
+        }
+
+        .column-main { flex: 2; display: flex; flex-direction: column; min-width: 0; }
+        .column-side { flex: 1; min-width: 320px; display: flex; flex-direction: column; gap: 1.5rem; overflow-y: auto; }
+
+        .panel {
+            background-color: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid var(--border);
+            background-color: rgba(0,0,0,0.2);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .tabs { display: flex; gap: 0.5rem; }
+        .tab-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            font-size: 0.9rem;
+            border-radius: 4px;
+        }
+        .tab-btn.active { background-color: var(--border); color: var(--text-main); }
+
+        .tab-content { display: none; flex: 1; flex-direction: column; overflow-y: auto; padding: 1.5rem; }
+        .tab-content.active { display: flex; }
+
+        .panel-body { padding: 1rem; display: flex; flex-direction: column; flex: 1; overflow-y: auto; }
+
+        /* Form Styles */
+        .form-section { margin-bottom: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 1.5rem; }
+        .form-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+        .form-section h3 { font-size: 1rem; color: var(--accent); margin-bottom: 1rem; }
+
+        .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        .form-group { margin-bottom: 1rem; }
+        .form-group.full { grid-column: 1 / -1; }
+
+        label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 0.25rem; }
+        small { display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.5rem; }
+
+        input[type="text"], input[type="password"], input[type="number"], input[type="url"], select {
+            width: 100%;
+            padding: 0.6rem;
+            background-color: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-main);
+            font-size: 0.9rem;
+        }
+        input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+
+        .checkbox-group { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; }
+        .checkbox-group input { width: 1rem; height: 1rem; accent-color: var(--accent); }
+        .checkbox-group label { margin-bottom: 0; cursor: pointer; }
+
+        /* Editor Styles */
+        textarea {
+            flex: 1;
+            width: 100%;
+            background-color: var(--bg-input);
+            color: var(--text-main);
+            border: none;
+            font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
+            font-size: 0.9rem;
+            line-height: 1.5;
+            resize: none;
+            outline: none;
+            white-space: pre;
+        }
+
+        .panel-footer { padding: 1rem 1.5rem; border-top: 1px solid var(--border); }
+
+        button.primary {
+            width: 100%;
+            padding: 0.75rem;
+            background-color: var(--accent);
+            color: #000;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+        }
+        button.primary:hover { background-color: var(--accent-hover); }
+        button.primary:disabled { opacity: 0.7; cursor: not-allowed; }
+
+        /* Status Box Styles */
+        .status-box {
+            background-color: var(--bg-input);
+            padding: 1rem;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            line-height: 1.5;
+            overflow-y: auto;
+            max-height: 400px;
+        }
+        .status-box strong { color: var(--text-main); }
+        .status-box .muted { color: var(--text-muted); }
+        .status-box .error { color: var(--error); }
+        .status-source { margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border); }
+        .status-source:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+        .status-url { font-weight: 600; word-break: break-all; color: var(--accent); }
+        .status-details { font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem; }
+
+        /* Terminal Box */
+        .terminal-box {
+            background-color: #000;
+            color: #4ade80;
+            font-family: "Fira Code", Consolas, monospace;
+            font-size: 0.8rem;
+            padding: 0.75rem;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+            height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-break: break-all;
+            margin-top: 1rem;
+            display: none;
+        }
+
+        .toast {
+            position: fixed; bottom: 2rem; right: 2rem; padding: 1rem 1.5rem; border-radius: 8px;
+            font-weight: 500; color: white; opacity: 0; transform: translateY(1rem);
+            transition: all 0.3s; pointer-events: none; z-index: 1000;
+        }
+        .toast.show { opacity: 1; transform: translateY(0); }
+        .toast.success { background-color: var(--success); }
+        .toast.error { background-color: var(--error); }
+
+        @media (max-width: 900px) {
+            main { flex-direction: column; overflow-y: auto; padding: 1rem; }
+            .column-main { min-height: 50vh; }
+            .form-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>ytdlp2strm</h1>
+        <nav>
+            <a href="/metrics" target="_blank">Metrics</a>
+            <a href="/channels" target="_blank">Channels API</a>
+        </nav>
+    </header>
+
+    <main>
+        <div class="column-main panel">
+            <div class="panel-header">
+                <h2>Configuration</h2>
+                <div class="tabs">
+                    <button class="tab-btn active" onclick="switchTab('form')">Settings Form</button>
+                    <button class="tab-btn" onclick="switchTab('toml')">Advanced (TOML)</button>
+                </div>
+            </div>
+
+            <div id="tab-form" class="tab-content active">
+                <form id="settings-form">
+                    <div class="form-section">
+                        <h3>Server & Security</h3>
+                        <div class="form-group">
+                            <label>Bind Address</label>
+                            <small>Either an IP:port (e.g. 127.0.0.1:8080) or a URL.</small>
+                            <input type="text" id="cfg_server_address" required>
+                        </div>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Username</label>
+                                <small>Leave blank to disable authentication.</small>
+                                <input type="text" id="cfg_auth_username">
+                            </div>
+                            <div class="form-group">
+                                <label>Password</label>
+                                <small>Required if a username is set.</small>
+                                <input type="password" id="cfg_auth_password">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>SponsorBlock</h3>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="cfg_sb_enabled">
+                            <label for="cfg_sb_enabled">Enable SponsorBlock Filtering</label>
+                        </div>
+                        <div class="form-group">
+                            <label>Categories to Remove</label>
+                            <small>Use "default", "all", "none", or a comma-separated list.</small>
+                            <input type="text" id="cfg_sb_remove">
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Paths & Storage</h3>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>STRM Output Dir</label>
+                                <small>Where .strm and .nfo files are saved.</small>
+                                <input type="text" id="cfg_strm_output_dir">
+                            </div>
+                            <div class="form-group">
+                                <label>Downloads Output Dir</label>
+                                <small>Where downloaded videos are cached.</small>
+                                <input type="text" id="cfg_downloads_output_dir">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label>Binaries Dir</label>
+                            <small>Where portable yt-dlp and ffmpeg are stored
+                                if not present on PATH.</small>
+                            <input type="text" id="cfg_deps_bin_dir">
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Playback Mode</h3>
+                        <div class="form-group">
+                            <label>Default STRM Mode</label>
+                            <small>"stream" for HLS bridging (no disk use), "download" for local caching.</small>
+                            <select id="cfg_strm_mode">
+                                <option value="stream">Stream</option>
+                                <option value="download">Download</option>
+                            </select>
+                        </div>
+                    </div>
+                </form>
+            </div>
+
+            <div id="tab-toml" class="tab-content">
+                <textarea id="config-editor" spellcheck="false"></textarea>
+            </div>
+
+            <div class="panel-footer">
+                <button class="primary" id="save-btn" onclick="saveConfig()">Save & Apply Configuration</button>
+            </div>
+        </div>
+
+        <div class="column-side">
+            <div class="panel">
+                <div class="panel-header"><h2>Quick Scan</h2></div>
+                <div class="panel-body">
+                    <form onsubmit="event.preventDefault(); triggerScan();">
+                        <div class="form-group">
+                            <label>URL</label>
+                            <input type="url" id="scan-url" placeholder="https://www.youtube.com/@mkbhd" required>
+                        </div>
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Limit</label>
+                                <input type="number" id="scan-limit" value="50" min="1" max="1000">
+                            </div>
+                            <div class="form-group">
+                                <label>Mode</label>
+                                <select id="scan-mode">
+                                    <option value="">Default</option>
+                                    <option value="stream">Stream</option>
+                                    <option value="download">Download</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="scan-force">
+                            <label for="scan-force">Force overwrite</label>
+                        </div>
+                        <!-- New Checkbox -->
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="scan-add-to-schedule">
+                            <label for="scan-add-to-schedule">Add to Auto-Schedule</label>
+                        </div>
+                        <button type="submit" class="primary" id="scan-btn">Start Scan</button>
+                    </form>
+
+                    <div id="scan-output" class="terminal-box"></div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-header"><h2>Schedule Status</h2></div>
+                <div class="panel-body">
+                    <div id="schedule-status" class="status-box">Loading...</div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+        let fullConfig = null;
+        let scanPollInterval = null;
+        const toast = document.getElementById('toast');
+
+        function showToast(msg, isError = false) {
+            toast.textContent = msg;
+            toast.className = `toast show ${isError ? 'error' : 'success'}`;
+            setTimeout(() => { toast.classList.remove('show'); }, 4000);
+        }
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+            if (tab === 'form') {
+                document.querySelectorAll('.tab-btn')[0].classList.add('active');
+                document.getElementById('tab-form').classList.add('active');
+            } else {
+                document.querySelectorAll('.tab-btn')[1].classList.add('active');
+                document.getElementById('tab-toml').classList.add('active');
+            }
+        }
+
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/config');
+                if (!res.ok) throw new Error(await res.text());
+                const data = await res.json();
+
+                fullConfig = data.json;
+                document.getElementById('config-editor').value = data.toml;
+
+                document.getElementById('cfg_server_address').value = fullConfig.server.address;
+                document.getElementById('cfg_auth_username').value = fullConfig.auth.username;
+                document.getElementById('cfg_auth_password').value = fullConfig.auth.password;
+                document.getElementById('cfg_sb_enabled').checked = fullConfig.sponsorblock.enabled;
+                document.getElementById('cfg_sb_remove').value = fullConfig.sponsorblock.remove;
+                document.getElementById('cfg_strm_output_dir').value = fullConfig.strm.output_dir;
+                document.getElementById('cfg_downloads_output_dir').value = fullConfig.downloads.output_dir;
+                document.getElementById('cfg_deps_bin_dir').value = fullConfig.deps.bin_dir;
+                document.getElementById('cfg_strm_mode').value = fullConfig.strm.mode;
+            } catch (e) {
+                showToast("Error loading config: " + e.message, true);
+            }
+        }
+
+        async function saveConfig() {
+            const btn = document.getElementById('save-btn');
+            btn.disabled = true;
+            btn.textContent = "Saving...";
+
+            const isFormActive = document.getElementById('tab-form').classList.contains('active');
+            let payload = {};
+
+            if (isFormActive) {
+                fullConfig.server.address = document.getElementById('cfg_server_address').value;
+                fullConfig.auth.username = document.getElementById('cfg_auth_username').value;
+                fullConfig.auth.password = document.getElementById('cfg_auth_password').value;
+                fullConfig.sponsorblock.enabled = document.getElementById('cfg_sb_enabled').checked;
+                fullConfig.sponsorblock.remove = document.getElementById('cfg_sb_remove').value;
+                fullConfig.strm.output_dir = document.getElementById('cfg_strm_output_dir').value;
+                fullConfig.downloads.output_dir = document.getElementById('cfg_downloads_output_dir').value;
+                fullConfig.deps.bin_dir = document.getElementById('cfg_deps_bin_dir').value;
+                fullConfig.strm.mode = document.getElementById('cfg_strm_mode').value;
+                payload = fullConfig;
+            } else {
+                payload = { toml: document.getElementById('config-editor').value };
+            }
+
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || "Save failed");
+
+                showToast("Config applied successfully!");
+                if (data.toml) {
+                    document.getElementById('config-editor').value = data.toml;
+                }
+            } catch (e) {
+                showToast("Failed to save: " + e.message, true);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "Save & Apply Configuration";
+            }
+        }
+
+        async function triggerScan() {
+            const btn = document.getElementById('scan-btn');
+            const outputBox = document.getElementById('scan-output');
+
+            btn.disabled = true;
+            btn.textContent = "Scanning...";
+            outputBox.style.display = 'block';
+            outputBox.textContent = "Starting scan...\n";
+
+            const url = document.getElementById('scan-url').value;
+            const limit = parseInt(document.getElementById('scan-limit').value);
+            const mode = document.getElementById('scan-mode').value;
+            const force = document.getElementById('scan-force').checked;
+            const add_to_schedule = document.getElementById('scan-add-to-schedule').checked;
+
+            const payload = { url, limit, force, add_to_schedule };
+            if (mode) payload.mode = mode;
+
+            try {
+                const res = await fetch('/scan/background', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || "Scan failed to start");
+
+                showToast("Scan started in background");
+
+                if (scanPollInterval) clearInterval(scanPollInterval);
+                scanPollInterval = setInterval(async () => {
+                    const logRes = await fetch('/scan/logs');
+                    const logData = await logRes.json();
+
+                    outputBox.textContent = logData.logs.join('\n');
+                    outputBox.scrollTop = outputBox.scrollHeight;
+
+                    if (!logData.running) {
+                        clearInterval(scanPollInterval);
+                        scanPollInterval = null;
+                        btn.disabled = false;
+                        btn.textContent = "Start Scan";
+                        showToast("Scan finished");
+                    }
+                }, 500);
+
+            } catch (e) {
+                showToast(e.message, true);
+                btn.disabled = false;
+                btn.textContent = "Start Scan";
+                outputBox.textContent += `\nError: ${e.message}`;
+            }
+        }
+
+        async function loadStatus() {
+            try {
+                const res = await fetch('/schedule/status');
+                const data = await res.json();
+                const container = document.getElementById('schedule-status');
+
+                if (!data.enabled) {
+                    container.innerHTML = "Scheduler is disabled in config.";
+                    return;
+                }
+
+                let html = `<div><strong>Scheduler:</strong> Enabled (<code>${data.refresh_cron}</code>)</div>`;
+                html += `<div style="margin-bottom: 1rem;"><strong>Currently Refreshing:</strong> ${data.currently_refreshing ? '<span style="color: var(--accent)">Yes</span>' : 'No'}</div>`;
+
+                if (data.sources.length === 0) {
+                    html += `<div class="muted">No sources configured.</div>`;
+                } else {
+                    data.sources.forEach(s => {
+                        html += `<div class="status-source">`;
+                        html += `<div class="status-url">${s.url}</div>`;
+                        html += `<div class="status-details">`;
+                        html += `Limit: ${s.limit} | `;
+
+                        if (s.last_run) {
+                            const d = new Date(s.last_run);
+                            html += `Last run: ${d.toLocaleString()} | `;
+                            html += `Results: ${s.last_total} total, ${s.last_written} written, ${s.last_skipped} skipped`;
+                        } else {
+                            html += `<span class="muted">Not run yet</span>`;
+                        }
+                        html += `</div>`;
+
+                        if (s.last_error) {
+                            html += `<div class="error" style="font-size: 0.8rem; margin-top: 0.25rem;">Error: ${s.last_error}</div>`;
+                        }
+                        html += `</div>`;
+                    });
+                }
+
+                container.innerHTML = html;
+            } catch (e) {
+                document.getElementById('schedule-status').textContent = "Error loading status.";
+            }
+        }
+
+        loadConfig();
+        loadStatus();
+        setInterval(loadStatus, 10000);
+    </script>
+</body>
+</html>

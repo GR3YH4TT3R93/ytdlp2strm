@@ -77,8 +77,9 @@ fn try_acquire_refresh(state: &AppState) -> Option<RefreshGuard> {
 }
 
 async fn do_refresh(state: AppState, guard: RefreshGuard) {
-    let sources = state.config.schedule.sources.clone();
-    let delay = Duration::from_secs(state.config.schedule.per_source_delay_seconds);
+    let cfg = state.config();
+    let sources = cfg.schedule.sources.clone();
+    let delay = Duration::from_secs(cfg.schedule.per_source_delay_seconds);
 
     tracing::info!(sources = sources.len(), "refresh starting");
 
@@ -93,7 +94,8 @@ async fn do_refresh(state: AppState, guard: RefreshGuard) {
             &source.url,
             source.limit,
             false,
-            state.config.strm.mode,
+            cfg.strm.mode,
+            None,
         )
         .await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -121,7 +123,7 @@ async fn do_refresh(state: AppState, guard: RefreshGuard) {
             entry.last_error = error_msg.clone();
             status.clone()
         };
-        save_schedule_status(&state.config.state.schedule_file, &snapshot).await;
+        save_schedule_status(&state.config().state.schedule_file, &snapshot).await;
 
         match error_msg {
             None => tracing::info!(
@@ -139,10 +141,6 @@ async fn do_refresh(state: AppState, guard: RefreshGuard) {
         }
     }
 
-    if let Err(e) = crate::downloads::cleanup_old(&state).await {
-        tracing::warn!(error = %e, "scheduled download cleanup failed");
-    }
-
     drop(guard);
     tracing::info!("refresh complete");
 }
@@ -155,7 +153,8 @@ async fn run_scheduled_refresh(state: AppState) {
 }
 
 pub async fn setup(state: AppState) -> anyhow::Result<Option<JobScheduler>> {
-    if !state.config.schedule.is_enabled() {
+    let cfg = state.config();
+    if !cfg.schedule.is_enabled() {
         tracing::info!("cron scheduler disabled (no sources or empty refresh_cron)");
         return Ok(None);
     }
@@ -164,7 +163,7 @@ pub async fn setup(state: AppState) -> anyhow::Result<Option<JobScheduler>> {
         .await
         .context("initializing cron scheduler")?;
 
-    let raw_cron = state.config.schedule.refresh_cron.clone();
+    let raw_cron = cfg.schedule.refresh_cron.clone();
     let cron = if raw_cron.split_whitespace().count() == 5 {
         format!("0 {raw_cron}")
     } else {
@@ -187,8 +186,8 @@ pub async fn setup(state: AppState) -> anyhow::Result<Option<JobScheduler>> {
     tracing::info!(
         cron = %cron,
         raw_cron = %raw_cron,
-        sources = state.config.schedule.sources.len(),
-        delay_seconds = state.config.schedule.per_source_delay_seconds,
+        sources = cfg.schedule.sources.len(),
+        delay_seconds = cfg.schedule.per_source_delay_seconds,
         job_id = %job_id,
         "cron scheduler started"
     );
@@ -197,11 +196,11 @@ pub async fn setup(state: AppState) -> anyhow::Result<Option<JobScheduler>> {
 }
 
 pub async fn schedule_status_handler(State(state): State<AppState>) -> Json<Value> {
+    let cfg = state.config();
     let status = state.schedule_status.lock().unwrap();
     let running = *state.refresh_running.lock().unwrap();
 
-    let sources: Vec<Value> = state
-        .config
+    let sources: Vec<Value> = cfg
         .schedule
         .sources
         .iter()
@@ -222,16 +221,17 @@ pub async fn schedule_status_handler(State(state): State<AppState>) -> Json<Valu
         .collect();
 
     Json(json!({
-        "enabled": state.config.schedule.is_enabled(),
-        "refresh_cron": state.config.schedule.refresh_cron,
-        "per_source_delay_seconds": state.config.schedule.per_source_delay_seconds,
+        "enabled": cfg.schedule.is_enabled(),
+        "refresh_cron": cfg.schedule.refresh_cron,
+        "per_source_delay_seconds": cfg.schedule.per_source_delay_seconds,
         "currently_refreshing": running,
         "sources": sources,
     }))
 }
 
 pub async fn schedule_trigger(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
-    if !state.config.schedule.is_enabled() {
+    let cfg = state.config();
+    if !cfg.schedule.is_enabled() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -254,7 +254,7 @@ pub async fn schedule_trigger(State(state): State<AppState>) -> (StatusCode, Jso
         }
     };
 
-    let sources = state.config.schedule.sources.len();
+    let sources = cfg.schedule.sources.len();
     let state_clone = state.clone();
     tokio::spawn(async move {
         do_refresh(state_clone, guard).await;

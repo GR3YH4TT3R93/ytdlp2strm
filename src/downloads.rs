@@ -25,14 +25,12 @@ fn is_valid_video_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Scan the downloads directory for a file whose stem matches `video_id`.
-/// Returns the first complete file (ignores `.part` and `.info.json`).
 async fn find_downloaded(state: &AppState, video_id: &str) -> Option<PathBuf> {
-    let dir = &state.config.downloads.output_dir;
+    let cfg = state.config();
+    let dir = &cfg.downloads.output_dir;
     let mut rd = tokio::fs::read_dir(dir).await.ok()?;
     while let Ok(Some(entry)) = rd.next_entry().await {
         let name = entry.file_name().to_string_lossy().to_string();
-        // yt-dlp output: "<id>.<ext>" or "<id>.info.json", "<id>.part"
         let Some(stem) = name.split('.').next() else {
             continue;
         };
@@ -70,7 +68,6 @@ where
         let _guard = lock.lock().await;
         f.await
     };
-    // Clean up the map entry if we're the last holder.
     let mut locks = state.video_locks.lock().unwrap();
     if let Some(existing) = locks.get(video_id) {
         if Arc::strong_count(existing) <= 2 {
@@ -112,14 +109,15 @@ pub async fn ensure_downloaded(state: &AppState, video_id: &str) -> anyhow::Resu
         let started = Instant::now();
         tracing::info!(video_id, "download starting");
 
-        let dir = &state.config.downloads.output_dir;
+        let cfg = state.config();
+        let dir = &cfg.downloads.output_dir;
         tokio::fs::create_dir_all(dir).await.ok();
         let template = dir.join("%(id)s.%(ext)s");
 
         let opts = DownloadOptions {
             output_template: &template,
             sponsorblock_categories: state.sponsorblock.categories(),
-            sponsorblock_api: state.config.sponsorblock.api.as_deref(),
+            sponsorblock_api: cfg.sponsorblock.api.as_deref(),
         };
 
         let path = match state.ytdlp.download_video(video_id, opts).await {
@@ -175,28 +173,24 @@ fn mime_for(path: &Path) -> &'static str {
 
 fn parse_range(header: &str, size: u64) -> Option<(u64, u64)> {
     let rest = header.trim().strip_prefix("bytes=")?;
-    // Only first range — multi-range is not used by media players.
     let range = rest.split(',').next()?.trim();
     let mut parts = range.splitn(2, '-');
     let start_str = parts.next()?.trim();
     let end_str = parts.next().unwrap_or("").trim();
 
     if start_str.is_empty() {
-        // "bytes=-N": last N bytes
         let n: u64 = end_str.parse().ok()?;
         if n == 0 || n > size {
             return None;
         }
         Some((size - n, size - 1))
     } else if end_str.is_empty() {
-        // "bytes=N-": from N to end
         let start: u64 = start_str.parse().ok()?;
         if start >= size {
             return None;
         }
         Some((start, size - 1))
     } else {
-        // "bytes=N-M"
         let start: u64 = start_str.parse().ok()?;
         let end: u64 = end_str.parse().ok()?;
         if start > end || start >= size {
@@ -263,14 +257,13 @@ pub async fn download_endpoint(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))
 }
 
-/// Delete download files older than `retention_days`. Called at startup
-/// and once per cron refresh.
 pub async fn cleanup_old(state: &AppState) -> anyhow::Result<()> {
-    let days = state.config.downloads.retention_days;
+    let cfg = state.config();
+    let days = cfg.downloads.retention_days;
     if days == 0 {
         return Ok(());
     }
-    let dir = &state.config.downloads.output_dir;
+    let dir = &cfg.downloads.output_dir;
     if tokio::fs::metadata(dir).await.is_err() {
         return Ok(());
     }
@@ -309,9 +302,6 @@ pub async fn cleanup_old(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Spawn a background download. Used by download-mode scans when
-/// `pre_download = true`. Fire-and-forget — errors are logged by
-/// `ensure_downloaded` itself.
 pub fn spawn_pre_download(state: AppState, video_id: String) {
     tokio::spawn(async move {
         if let Err(e) = ensure_downloaded(&state, &video_id).await {
@@ -323,7 +313,8 @@ pub fn spawn_pre_download(state: AppState, video_id: String) {
 #[allow(dead_code)]
 pub async fn stats(state: &AppState) -> HashMap<String, u64> {
     let mut out = HashMap::new();
-    let dir = &state.config.downloads.output_dir;
+    let cfg = state.config();
+    let dir = &cfg.downloads.output_dir;
     let mut count = 0u64;
     let mut bytes = 0u64;
     if let Ok(mut rd) = tokio::fs::read_dir(dir).await {

@@ -16,7 +16,7 @@ mod ytdlp;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -37,14 +37,11 @@ use crate::ytdlp::Ytdlp;
 #[derive(Parser, Debug)]
 #[command(version, about = "yt-dlp to STRM bridge server")]
 struct Cli {
-    /// Path to the TOML config file.
-    /// Overrides standard system/user/portable resolution.
     #[arg(short, long)]
     config: Option<PathBuf>,
 }
 
 fn resolve_paths(cli_config: Option<PathBuf>) -> (PathBuf, PathBuf) {
-    // 1. Explicit CLI Argument
     if let Some(p) = cli_config {
         let abs_p = std::path::absolute(&p).unwrap_or(p.clone());
         let parent = abs_p
@@ -54,15 +51,12 @@ fn resolve_paths(cli_config: Option<PathBuf>) -> (PathBuf, PathBuf) {
         return (abs_p, parent);
     }
 
-    // 2. Local / Portable (Current Working Directory)
     let cwd_cfg = PathBuf::from("config.toml");
     if cwd_cfg.exists() {
         return (cwd_cfg, PathBuf::from("."));
     }
 
     let proj_dirs = ProjectDirs::from("", "", "ytdlp2strm");
-
-    // 3. User Config (XDG)
     if let Some(proj) = &proj_dirs {
         let xdg_cfg = proj.config_dir().join("config.toml");
         if xdg_cfg.exists() {
@@ -70,26 +64,22 @@ fn resolve_paths(cli_config: Option<PathBuf>) -> (PathBuf, PathBuf) {
         }
     }
 
-    // 4. System-wide POSIX Config
     let etc_cfg = PathBuf::from("/etc/ytdlp2strm/config.toml");
     if etc_cfg.exists() {
         return (etc_cfg, PathBuf::from("/var/lib/ytdlp2strm"));
     }
 
-    // 5. No config exists anywhere. Generate standard defaults based on user privileges.
     #[cfg(unix)]
     let is_root = unsafe { libc::geteuid() == 0 };
     #[cfg(not(unix))]
     let is_root = false;
 
     if is_root {
-        // Generate System-wide (e.g. for a systemd service)
         (
             PathBuf::from("/etc/ytdlp2strm/config.toml"),
             PathBuf::from("/var/lib/ytdlp2strm"),
         )
     } else {
-        // Generate Local/Portable (e.g. user just ran the downloaded binary)
         (PathBuf::from("config.toml"), PathBuf::from("."))
     }
 }
@@ -105,7 +95,6 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let (config_path, data_dir) = resolve_paths(cli.config);
 
-    // Ensure data directory exists and change into it so relative paths (./strm, ./bin) resolve correctly.
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         eprintln!(
             "Warning: could not create data directory at {}: {e}",
@@ -118,7 +107,6 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Generate default config if missing
     if !config_path.exists() {
         println!("Configuration file not found at: {}", config_path.display());
         println!("Generating a default configuration template...");
@@ -139,13 +127,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Load the config
     let raw = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading config at {}", config_path.display()))?;
     let config: AppConfig = toml::from_str(&raw)
         .with_context(|| format!("parsing config at {}", config_path.display()))?;
 
-    // Ensure Dependencies (yt-dlp, ffmpeg)
     let deps = deps::ensure_binaries(&config.deps.bin_dir, config.deps.auto_download).await?;
     let yt_extra_args = config.youtube.extra_args.clone();
 
@@ -174,40 +160,22 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("HTTP Basic auth disabled (no username configured)");
     }
 
-    tracing::info!(
-        strm_mode = %config.strm.mode,
-        write_nfo = config.metadata.write_nfo,
-        write_thumbnails = config.metadata.write_thumbnails,
-        metadata_level = ?config.metadata.metadata_level,
-        "configuration"
-    );
-
-    // STRM directory
     let strm_dir = config.strm.output_dir.clone();
     tokio::fs::create_dir_all(&strm_dir)
         .await
         .with_context(|| format!("creating strm dir at {}", strm_dir.display()))?;
-    tracing::info!(strm_dir = %strm_dir.display(), "strm output ready");
 
-    // Downloads directory + concurrency
     let downloads_dir = config.downloads.output_dir.clone();
     tokio::fs::create_dir_all(&downloads_dir)
         .await
         .with_context(|| format!("creating downloads dir at {}", downloads_dir.display()))?;
     let download_concurrency = config.downloads.concurrency.max(1);
-    tracing::info!(
-        downloads_dir = %downloads_dir.display(),
-        concurrency = download_concurrency,
-        retention_days = config.downloads.retention_days,
-        pre_download = config.downloads.pre_download,
-        "downloads configured"
-    );
 
     let schedule_status_path = config.state.schedule_file.clone();
     let schedule_status = schedule::load_schedule_status(&schedule_status_path).await;
 
     let state = AppState {
-        config: Arc::new(config),
+        config: Arc::new(RwLock::new(config)),
         ytdlp: Ytdlp::from_path_with_args(deps.yt_dlp_binary, deps.bin_dir, yt_extra_args),
         http,
         sponsorblock,
@@ -217,9 +185,10 @@ async fn main() -> anyhow::Result<()> {
         metrics: Arc::new(Metrics::default()),
         video_locks: Arc::new(Mutex::new(HashMap::new())),
         download_sem: Arc::new(Semaphore::new(download_concurrency)),
+        scan_logs: Arc::new(Mutex::new(Vec::new())),
+        scan_running: Arc::new(Mutex::new(false)),
     };
 
-    // Startup cleanup of old downloads
     if let Err(e) = downloads::cleanup_old(&state).await {
         tracing::warn!(error = %e, "startup download cleanup failed");
     }
@@ -241,13 +210,21 @@ async fn main() -> anyhow::Result<()> {
 
     let auth_state = state.clone();
     let protected = Router::new()
+        .route("/", get(handlers::serve_ui))
+        .route(
+            "/api/config",
+            get(handlers::get_config_api).post(handlers::save_config_api),
+        )
         .route("/debug/resolve/{video_id}", get(handlers::debug_resolve))
         .route(
             "/debug/sponsorblock/{video_id}",
             get(handlers::debug_sponsorblock),
         )
         .route("/strm/{video_id}", get(handlers::strm_generate))
+        // Scan endpoints
         .route("/scan", post(scan::scan_channel))
+        .route("/scan/background", post(scan::scan_background))
+        .route("/scan/logs", get(scan::get_scan_logs))
         .route("/schedule/trigger", post(schedule::schedule_trigger))
         .route("/channels", get(handlers::list_channels))
         .route_layer(middleware::from_fn_with_state(

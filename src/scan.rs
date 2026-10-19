@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Context;
@@ -15,6 +16,17 @@ use crate::metadata::{build_episode_nfo, build_tvshow_nfo, get_video_metadata, x
 use crate::state::AppState;
 use crate::ytdlp::ChannelInfo;
 
+fn emit_log(logs: Option<&Arc<Mutex<Vec<String>>>>, msg: String) {
+    if let Some(logs) = logs {
+        if let Ok(mut l) = logs.lock() {
+            l.push(msg);
+            if l.len() > 200 {
+                l.remove(0);
+            }
+        }
+    }
+}
+
 struct ChannelMetaResult {
     nfo_written: usize,
     nfo_skipped: usize,
@@ -27,6 +39,7 @@ async fn write_channel_metadata(
     channel_dir: &Path,
     info: &ChannelInfo,
     force: bool,
+    logs: Option<&Arc<Mutex<Vec<String>>>>,
 ) -> ChannelMetaResult {
     let mut result = ChannelMetaResult {
         nfo_written: 0,
@@ -35,8 +48,10 @@ async fn write_channel_metadata(
         poster_skipped: 0,
     };
 
+    let cfg = state.config();
+
     let mut poster_filename: Option<String> = None;
-    if state.config.metadata.write_thumbnails {
+    if cfg.metadata.write_thumbnails {
         let base_path = channel_dir.join("poster");
         let existing = find_existing_image(&base_path);
         if !force && existing.is_some() {
@@ -45,6 +60,7 @@ async fn write_channel_metadata(
                 poster_filename = p.file_name().map(|n| n.to_string_lossy().to_string());
             }
         } else if let Some(url) = &info.thumbnail_url {
+            emit_log(logs, "Downloading channel poster...".to_string());
             match download_image(&state.http, url, &base_path).await {
                 Ok(final_path) => {
                     result.poster_written = 1;
@@ -58,13 +74,14 @@ async fn write_channel_metadata(
                     cleanup_image_variants(&base_path, &final_path).await;
                 }
                 Err(e) => {
+                    emit_log(logs, format!("Poster download failed: {e}"));
                     tracing::warn!(channel = %info.name, error = %e, "channel poster download failed");
                 }
             }
         }
     }
 
-    if state.config.metadata.write_nfo {
+    if cfg.metadata.write_nfo {
         let nfo_path = channel_dir.join("tvshow.nfo");
         let exists = tokio::fs::metadata(&nfo_path).await.is_ok();
         if !force && exists {
@@ -135,9 +152,10 @@ pub async fn run_scan(
     limit: usize,
     force: bool,
     mode: StrmMode,
+    logs: Option<&Arc<Mutex<Vec<String>>>>,
 ) -> anyhow::Result<ScanResult> {
     state.metrics.scans_started.fetch_add(1, Ordering::Relaxed);
-    let result = run_scan_inner(state, url, limit, force, mode).await;
+    let result = run_scan_inner(state, url, limit, force, mode, logs).await;
     match &result {
         Ok(_) => {
             state
@@ -158,48 +176,33 @@ async fn run_scan_inner(
     limit: usize,
     force: bool,
     mode: StrmMode,
+    logs: Option<&Arc<Mutex<Vec<String>>>>,
 ) -> anyhow::Result<ScanResult> {
+    let cfg = state.config();
+
+    emit_log(logs, format!("Resolving URL: {url}"));
     let info = state.ytdlp.list_channel(url, limit).await?;
     let total = info.entries.len();
 
-    tracing::info!(
-        channel = %info.name,
-        total,
-        limit,
-        force,
-        mode = %mode,
-        metadata_level = ?state.config.metadata.metadata_level,
-        "channel enumerated"
-    );
+    let msg = format!("Found {} videos in channel: {}", total, info.name);
+    emit_log(logs, msg.clone());
+    tracing::info!(channel = %info.name, total, limit, force, mode = %mode, "channel enumerated");
 
-    if state.config.metadata.metadata_level == crate::config::MetadataLevel::Full && total > 0 {
-        tracing::info!(
-            total,
-            approx_secs = total * 2,
-            "metadata_level=full — each video will be resolved individually (~1-2s per video)"
-        );
-    }
-
-    let base_url = state.config.server.address.base_url();
+    let base_url = cfg.server.address.base_url();
     let endpoint = match mode {
         StrmMode::Stream => "play",
         StrmMode::Download => "download",
     };
 
-    let channel_dir = state
-        .config
-        .strm
-        .output_dir
-        .join(sanitize_filename(&info.name));
+    let channel_dir = cfg.strm.output_dir.join(sanitize_filename(&info.name));
 
     tokio::fs::create_dir_all(&channel_dir)
         .await
         .with_context(|| format!("mkdir {}", channel_dir.display()))?;
 
-    let channel_meta = if state.config.metadata.write_nfo || state.config.metadata.write_thumbnails
-    {
+    let channel_meta = if cfg.metadata.write_nfo || cfg.metadata.write_thumbnails {
         let phase_started = Instant::now();
-        let meta = write_channel_metadata(state, &channel_dir, &info, force).await;
+        let meta = write_channel_metadata(state, &channel_dir, &info, force, logs).await;
         tracing::info!(
             nfo_written = meta.nfo_written,
             nfo_skipped = meta.nfo_skipped,
@@ -210,7 +213,6 @@ async fn run_scan_inner(
         );
         meta
     } else {
-        tracing::info!("channel metadata skipped (disabled in config)");
         ChannelMetaResult {
             nfo_written: 0,
             nfo_skipped: 0,
@@ -230,7 +232,7 @@ async fn run_scan_inner(
     let mut failures: Vec<String> = Vec::new();
 
     let scan_started = Instant::now();
-    let pre_download = mode == StrmMode::Download && state.config.downloads.pre_download;
+    let pre_download = mode == StrmMode::Download && cfg.downloads.pre_download;
 
     for (idx, entry) in info.entries.iter().enumerate() {
         let progress = idx + 1;
@@ -266,18 +268,12 @@ async fn run_scan_inner(
                             .metrics
                             .strm_files_written
                             .fetch_add(1, Ordering::Relaxed);
-                        tracing::debug!(
-                            video_id = %entry.id,
-                            path = %new_strm_path.display(),
-                            "strm written"
-                        );
                     } else {
                         strm_skipped += 1;
                     }
                 }
                 Err(e) => {
                     failures.push(format!("strm {}: {e}", entry.id));
-                    tracing::warn!(video_id = %entry.id, error = %e, "strm write failed");
                 }
             }
         }
@@ -285,7 +281,7 @@ async fn run_scan_inner(
         // --- Thumbnail (before NFO) ---
         let mut thumb_filename: Option<String> = None;
         let mut thumb_changed = false;
-        if state.config.metadata.write_thumbnails {
+        if cfg.metadata.write_thumbnails {
             let old_thumb = existing.thumbs.get(&entry.id).cloned();
             if !force && old_thumb.is_some() {
                 thumb_skipped += 1;
@@ -314,14 +310,13 @@ async fn run_scan_inner(
                     }
                     Err(e) => {
                         failures.push(format!("thumb {}: {e}", entry.id));
-                        tracing::warn!(video_id = %entry.id, error = %e, "thumb download failed");
                     }
                 }
             }
         }
 
         // --- NFO (after thumbnail) ---
-        if state.config.metadata.write_nfo {
+        if cfg.metadata.write_nfo {
             let new_nfo_path = channel_dir.join(format!("{safe_title} [{}].nfo", entry.id));
             let nfo_fresh = if force || thumb_changed {
                 false
@@ -352,40 +347,26 @@ async fn run_scan_inner(
                     }
                     Err(e) => {
                         failures.push(format!("nfo {}: {e}", entry.id));
-                        tracing::warn!(video_id = %entry.id, error = %e, "nfo write failed");
                     }
                 }
             }
         }
 
-        // --- Background pre-download for download mode ---
         if pre_download {
             downloads::spawn_pre_download(state.clone(), entry.id.clone());
         }
 
-        tracing::info!(
-            progress = %format!("{progress}/{total}"),
-            video_id = %entry.id,
-            elapsed_ms = video_started.elapsed().as_millis() as u64,
-            "video processed"
-        );
+        let elapsed_ms = video_started.elapsed().as_millis() as u64;
+        tracing::info!(progress = %format!("{progress}/{total}"), video_id = %entry.id, elapsed_ms, "video processed");
 
-        if progress % 10 == 0 || progress == total {
-            tracing::info!(
-                progress = %format!("{progress}/{total}"),
-                strm_written,
-                strm_skipped,
-                nfo_written,
-                nfo_skipped,
-                thumb_written,
-                thumb_skipped,
-                failed = failures.len(),
-                elapsed_secs = scan_started.elapsed().as_secs(),
-                "scan progress"
-            );
-        }
+        let msg = format!(
+            "[{}/{}] Processed: {} ({}ms)",
+            progress, total, entry.title, elapsed_ms
+        );
+        emit_log(logs, msg);
     }
 
+    let elapsed_secs = scan_started.elapsed().as_secs();
     tracing::info!(
         channel = %info.name,
         total,
@@ -397,9 +378,18 @@ async fn run_scan_inner(
         thumb_written,
         thumb_skipped,
         failed = failures.len(),
-        elapsed_secs = scan_started.elapsed().as_secs(),
+        elapsed_secs,
         "scan complete"
     );
+
+    let summary = format!(
+        "Scan complete in {}s! {} STRMs written, {} skipped, {} failed.",
+        elapsed_secs,
+        strm_written,
+        strm_skipped,
+        failures.len()
+    );
+    emit_log(logs, summary);
 
     Ok(ScanResult {
         channel: info.name,
@@ -418,7 +408,7 @@ async fn run_scan_inner(
     })
 }
 
-// --- HTTP endpoint ---
+// --- HTTP endpoints ---
 
 #[derive(Debug, Deserialize)]
 pub struct ScanRequest {
@@ -427,9 +417,10 @@ pub struct ScanRequest {
     pub limit: Option<usize>,
     #[serde(default)]
     pub force: bool,
-    /// "stream" or "download". Defaults to `[strm] mode` from config.
     #[serde(default)]
     pub mode: Option<StrmMode>,
+    #[serde(default)]
+    pub add_to_schedule: bool,
 }
 
 const DEFAULT_SCAN_LIMIT: usize = 100;
@@ -452,12 +443,9 @@ pub async fn scan_channel(
             format!("limit must be 1..={MAX_SCAN_LIMIT}"),
         ));
     }
+    let mode = req.mode.unwrap_or_else(|| state.config().strm.mode);
 
-    let mode = req.mode.unwrap_or(state.config.strm.mode);
-
-    tracing::info!(url = %req.url, limit, force = req.force, mode = %mode, "scan starting");
-
-    let result = run_scan(&state, &req.url, limit, req.force, mode)
+    let result = run_scan(&state, &req.url, limit, req.force, mode, None)
         .await
         .map_err(|e| scan_err(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
 
@@ -477,4 +465,84 @@ pub async fn scan_channel(
         "failed": result.failures.len(),
         "errors": result.failures,
     })))
+}
+
+struct ScanGuard(Arc<Mutex<bool>>);
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() = false;
+    }
+}
+
+pub async fn scan_background(
+    State(state): State<AppState>,
+    Json(req): Json<ScanRequest>,
+) -> Result<Json<Value>, ScanError> {
+    let limit = req.limit.unwrap_or(DEFAULT_SCAN_LIMIT);
+    if limit == 0 || limit > MAX_SCAN_LIMIT {
+        return Err(scan_err(
+            StatusCode::BAD_REQUEST,
+            format!("limit must be 1..={MAX_SCAN_LIMIT}"),
+        ));
+    }
+    let mode = req.mode.unwrap_or_else(|| state.config().strm.mode);
+
+    {
+        let mut running = state.scan_running.lock().unwrap();
+        if *running {
+            return Err(scan_err(StatusCode::CONFLICT, "A scan is already running"));
+        }
+        *running = true;
+    }
+
+    {
+        let mut logs = state.scan_logs.lock().unwrap();
+        logs.clear();
+    }
+
+    if req.add_to_schedule {
+        match crate::handlers::add_schedule_source(&state, &req.url, limit).await {
+            Ok(true) => emit_log(
+                Some(&state.scan_logs),
+                format!("Added {} to auto-schedule.", req.url),
+            ),
+            Ok(false) => emit_log(
+                Some(&state.scan_logs),
+                format!("{} is already in the auto-schedule.", req.url),
+            ),
+            Err(e) => emit_log(
+                Some(&state.scan_logs),
+                format!("Failed to update config.toml: {}", e),
+            ),
+        }
+    }
+
+    let guard = ScanGuard(state.scan_running.clone());
+    let state_clone = state.clone();
+    let url = req.url.clone();
+    let force = req.force;
+
+    tokio::spawn(async move {
+        let _ = run_scan(
+            &state_clone,
+            &url,
+            limit,
+            force,
+            mode,
+            Some(&state_clone.scan_logs),
+        )
+        .await;
+        drop(guard);
+    });
+
+    Ok(Json(json!({"status": "started"})))
+}
+
+pub async fn get_scan_logs(State(state): State<AppState>) -> Json<Value> {
+    let running = *state.scan_running.lock().unwrap();
+    let logs = state.scan_logs.lock().unwrap().clone();
+    Json(json!({
+        "running": running,
+        "logs": logs,
+    }))
 }

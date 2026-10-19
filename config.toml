@@ -71,5 +71,5 @@ per_source_delay_seconds = 5
 # Uncomment and add your own sources below.
 sources = [
     { url = "https://www.youtube.com/@mkbhd", limit = 50 },
-    { url = "https://youtube.com/playlist?list=PLuzqoNvqVKyfYdqy9uvfzVImNTP-kpbO1", limit = 50 },
+    { url = "https://youtube.com/playlist?list=PLuzqoNvqVKyfYdqy9uvfzVImNTP-kpbO1", limit = 50 }, { url = "https://youtube.com/@smii7yminus", limit = 50 },
 ]

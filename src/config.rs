@@ -1,9 +1,9 @@
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use url::Url;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct AppConfig {
     pub server: ServerConfig,
     #[serde(default)]
@@ -26,33 +26,12 @@ pub struct AppConfig {
     pub schedule: ScheduleConfig,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct DepsConfig {
-    #[serde(default = "default_bin_dir")]
-    pub bin_dir: PathBuf,
-    #[serde(default = "default_true")]
-    pub auto_download: bool,
-}
-
-fn default_bin_dir() -> PathBuf {
-    PathBuf::from("./bin")
-}
-
-impl Default for DepsConfig {
-    fn default() -> Self {
-        Self {
-            bin_dir: default_bin_dir(),
-            auto_download: true,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ServerConfig {
     pub address: BindAddress,
 }
 
-#[derive(Debug, Default, Deserialize, Clone)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
 pub struct AuthConfig {
     #[serde(default)]
     pub username: String,
@@ -66,7 +45,7 @@ impl AuthConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SponsorBlockConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -90,13 +69,13 @@ impl Default for SponsorBlockConfig {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize, Clone)]
 pub struct YouTubeConfig {
     #[serde(default)]
     pub extra_args: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum StrmMode {
     #[default]
@@ -113,7 +92,7 @@ impl std::fmt::Display for StrmMode {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StrmConfig {
     #[serde(default = "default_strm_dir")]
     pub output_dir: PathBuf,
@@ -134,7 +113,7 @@ impl Default for StrmConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DownloadsConfig {
     #[serde(default = "default_downloads_dir")]
     pub output_dir: PathBuf,
@@ -169,7 +148,7 @@ impl Default for DownloadsConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MetadataLevel {
     Basic,
@@ -177,7 +156,7 @@ pub enum MetadataLevel {
     Full,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MetadataConfig {
     #[serde(default = "default_true")]
     pub write_nfo: bool,
@@ -201,7 +180,7 @@ impl Default for MetadataConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct StateConfig {
     #[serde(default = "default_schedule_file")]
     pub schedule_file: PathBuf,
@@ -219,7 +198,28 @@ impl Default for StateConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct DepsConfig {
+    #[serde(default = "default_bin_dir")]
+    pub bin_dir: PathBuf,
+    #[serde(default = "default_true")]
+    pub auto_download: bool,
+}
+
+fn default_bin_dir() -> PathBuf {
+    PathBuf::from("./bin")
+}
+
+impl Default for DepsConfig {
+    fn default() -> Self {
+        Self {
+            bin_dir: default_bin_dir(),
+            auto_download: true,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ScheduleConfig {
     #[serde(default = "default_refresh_cron")]
     pub refresh_cron: String,
@@ -247,7 +247,7 @@ impl Default for ScheduleConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ScheduleSource {
     pub url: String,
     #[serde(default = "default_source_limit")]
@@ -286,6 +286,19 @@ impl<'de> Deserialize<'de> for BindAddress {
     }
 }
 
+impl Serialize for BindAddress {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let s = match self {
+            BindAddress::Url(u) => u.clone(),
+            BindAddress::IpPort { ip, port } => format!("{}:{}", ip, port),
+        };
+        serializer.serialize_str(&s)
+    }
+}
+
 impl BindAddress {
     pub fn bind_addr(&self) -> SocketAddr {
         match self {
@@ -301,6 +314,15 @@ impl BindAddress {
         match self {
             BindAddress::Url(s) => s.clone(),
             BindAddress::IpPort { ip, port } => format!("http://{}:{}", ip, port),
+        }
+    }
+}
+
+impl std::fmt::Display for BindAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BindAddress::Url(s) => write!(f, "{}", s),
+            BindAddress::IpPort { ip, port } => write!(f, "{}:{}", ip, port),
         }
     }
 }
