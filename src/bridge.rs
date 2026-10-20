@@ -46,15 +46,20 @@ impl StreamKind {
         candidates.sort_by_key(|f| match self {
             StreamKind::Video => {
                 let h = f.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-                let is_avc = f
+                let is_vp9 = f
                     .get("vcodec")
                     .and_then(|v| v.as_str())
-                    .map_or(false, |v| v.starts_with("avc1")) as u64;
-                (h, is_avc)
+                    .map_or(false, |v| v.starts_with("vp09")) as u64;
+                (h, is_vp9)
             }
             StreamKind::Audio => {
                 let abr = f.get("abr").and_then(|v| v.as_u64()).unwrap_or(0);
-                (abr, 0)
+                // FIX: Prioritize Opus (itag 251/233) so audio is fMP4 to match the VP9 video
+                let is_opus =
+                    f.get("format_id")
+                        .and_then(|v| v.as_str())
+                        .map_or(false, |id| id == "251" || id == "233") as u64;
+                (is_opus, abr)
             }
         });
 
@@ -102,13 +107,16 @@ async fn build_filtered_playlist(
     kind: StreamKind,
     forced_format_id: Option<&str>,
 ) -> anyhow::Result<String> {
-    let cache_key = format!("playlist_{:?}_{:?}", video_id, forced_format_id);
+    let cache_key = format!("playlist_{:?}_{:?}_{:?}", video_id, kind, forced_format_id);
 
     if let Some(cached) = state.playlist_cache.get(&cache_key) {
         return Ok(cached);
     }
 
-    let disk_filename = format!("playlist_{}_{:?}.m3u8", video_id, kind);
+    let disk_filename = format!(
+        "playlist_{}_{:?}_{:?}.m3u8",
+        video_id, kind, forced_format_id
+    );
     if let Some(cached) = read_cache_file(&state.cache_dir, &disk_filename, state.cache_ttl).await {
         state.playlist_cache.set(cache_key, cached.clone());
         return Ok(cached);
@@ -133,7 +141,7 @@ async fn build_filtered_playlist(
 
     let video_url = format!("https://www.youtube.com/watch?v={video_id}");
 
-    let url_cache_key = format!("streamurl_{}", format_id);
+    let url_cache_key = format!("streamurl_{}_{}", video_id, format_id);
     let media_manifest_url = if let Some(cached_url) = state.playlist_cache.get(&url_cache_key) {
         cached_url
     } else {
@@ -201,7 +209,6 @@ async fn build_master_body(
                 "video format missing id".to_string(),
             )
         })?;
-
     let audio_format_id = audio_fmt
         .get("format_id")
         .and_then(|v| v.as_str())
@@ -216,32 +223,50 @@ async fn build_master_body(
         .get("vcodec")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let acodec = audio_fmt
-        .get("acodec")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
     let height = video_fmt
         .get("height")
         .and_then(|v| v.as_u64())
-        .unwrap_or(1080);
-    let width = video_fmt
-        .get("width")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1920);
+        .unwrap_or(0);
+    let width = video_fmt.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    // FIX: Ensure Opus formats (251/233) report "opus" in the master playlist
+    let acodec = if audio_format_id == "251" || audio_format_id == "233" {
+        "opus"
+    } else {
+        audio_fmt
+            .get("acodec")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty() && *s != "none")
+            .unwrap_or("mp4a.40.2")
+    };
 
     let bandwidth = video_fmt
         .get("tbr")
-        .and_then(|v| v.as_f64())
+        .and_then(|x| x.as_f64())
         .map(|tbr| (tbr * 1000.0) as u64)
+        .filter(|b| *b > 0)
         .unwrap_or(5_000_000);
 
+    let resolution = if width > 0 && height > 0 {
+        format!(",RESOLUTION={width}x{height}")
+    } else {
+        String::new()
+    };
+
+    let mut codec_parts = Vec::new();
+    if !vcodec.is_empty() {
+        codec_parts.push(vcodec);
+    }
+    codec_parts.push(acodec);
+    let codecs = format!(",CODECS=\"{}\"", codec_parts.join(","));
+
     let base = format!("/bridge/{video_id}");
+
     let body = format!(
         "#EXTM3U\n\
          #EXT-X-VERSION:3\n\
          #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"main\",DEFAULT=YES,AUTOSELECT=YES,URI=\"{base}/audio.m3u8?fmt={audio_format_id}\"\n\
-         #EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={width}x{height},CODECS=\"{vcodec},{acodec}\",AUDIO=\"aud\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH={bandwidth}{resolution}{codecs},AUDIO=\"aud\"\n\
          {base}/video.m3u8?fmt={video_format_id}\n"
     );
 
@@ -262,7 +287,6 @@ pub async fn bridge_master(
         .fetch_add(1, Ordering::Relaxed);
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-        .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(body))
         .unwrap())
 }
@@ -278,7 +302,6 @@ pub async fn play_alias(
         .fetch_add(1, Ordering::Relaxed);
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-        .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(body))
         .unwrap())
 }
@@ -297,7 +320,6 @@ pub async fn bridge_video(
         .fetch_add(1, Ordering::Relaxed);
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-        .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(body))
         .unwrap())
 }
@@ -316,7 +338,6 @@ pub async fn bridge_audio(
         .fetch_add(1, Ordering::Relaxed);
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-        .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(body))
         .unwrap())
 }
@@ -369,12 +390,18 @@ pub async fn bridge_segment(
         .segments_proxied
         .fetch_add(1, Ordering::Relaxed);
 
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
     let mut builder = Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, "video/mp2t");
+        .header(header::CONTENT_TYPE, content_type);
 
     for h in [
-        reqwest::header::CONTENT_LENGTH,
         reqwest::header::CONTENT_RANGE,
         reqwest::header::ACCEPT_RANGES,
     ] {
