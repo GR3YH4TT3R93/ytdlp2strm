@@ -382,7 +382,11 @@
                 <div class="panel-header"><h2>Schedule Status</h2></div>
                 <div class="panel-body">
                     <div id="schedule-status" class="status-box">Loading...</div>
-                    <button id="trigger-schedule-btn" class="secondary" onclick="triggerSchedule()">Run Scheduled Scans</button>
+
+                    <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem;">
+                        <button id="trigger-schedule-btn" class="secondary" style="margin-top: 0;" onclick="triggerSchedule(false)">Run Scheduled Scans</button>
+                        <button id="force-schedule-btn" class="danger" onclick="triggerSchedule(true)">Force Rescan All</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -496,11 +500,16 @@
         function startLogPolling() {
             const stopBtn = document.getElementById('stop-scan-btn');
             const outputBox = document.getElementById('scan-output');
+            const scheduleBtn = document.getElementById('trigger-schedule-btn');
+            const forceBtn = document.getElementById('force-schedule-btn');
 
             outputBox.style.display = 'block';
             stopBtn.style.display = 'block';
             stopBtn.disabled = false;
             stopBtn.textContent = "Stop";
+
+            scheduleBtn.disabled = true;
+            forceBtn.disabled = true;
 
             if (scanPollInterval) clearInterval(scanPollInterval);
             scanPollInterval = setInterval(async () => {
@@ -515,6 +524,8 @@
                         clearInterval(scanPollInterval);
                         scanPollInterval = null;
                         stopBtn.style.display = 'none';
+                        scheduleBtn.disabled = false;
+                        forceBtn.disabled = false;
                         showToast("Scan finished");
                         loadStatus();
                     }
@@ -523,6 +534,8 @@
                     clearInterval(scanPollInterval);
                     scanPollInterval = null;
                     stopBtn.style.display = 'none';
+                    scheduleBtn.disabled = false;
+                    forceBtn.disabled = false;
                 }
             }, 500);
         }
@@ -582,15 +595,18 @@
             }
         }
 
-        async function triggerSchedule() {
-            const btn = document.getElementById('trigger-schedule-btn');
+        async function triggerSchedule(force = false) {
+            const btn = force ? document.getElementById('force-schedule-btn') : document.getElementById('trigger-schedule-btn');
+            const otherBtn = force ? document.getElementById('trigger-schedule-btn') : document.getElementById('force-schedule-btn');
+
             btn.disabled = true;
+            otherBtn.disabled = true;
             btn.textContent = "Starting...";
 
             try {
-                const res = await fetch('/schedule/trigger', { method: 'POST' });
+                const res = await fetch(`/schedule/trigger?force=${force}`, { method: 'POST' });
                 if (res.status === 202) {
-                    showToast("Scheduled scans started.");
+                    showToast(force ? "Forced rescan started." : "Scheduled scans started.");
                     startLogPolling();
                 } else if (res.status === 409) {
                     const data = await res.json();
@@ -607,7 +623,8 @@
                 showToast("Error: " + e.message, true);
             } finally {
                 btn.disabled = false;
-                btn.textContent = "Run Scheduled Scans";
+                otherBtn.disabled = false;
+                btn.textContent = force ? "Force Rescan All" : "Run Scheduled Scans";
             }
         }
 

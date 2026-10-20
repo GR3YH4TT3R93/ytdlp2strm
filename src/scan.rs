@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -27,6 +28,30 @@ fn emit_log(logs: Option<&Arc<Mutex<Vec<String>>>>, msg: String) {
     }
 }
 
+/// Parse YYYYMMDD or YYYY-MM-DD into (Year, Month)
+fn parse_date(date_opt: Option<&str>) -> Option<(i32, i32)> {
+    let s = date_opt?;
+
+    // Handle YYYY-MM-DD (length 10)
+    if s.len() >= 7 && s.contains('-') {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() >= 2 {
+            let y = parts[0].parse().ok()?;
+            let m = parts[1].parse().ok()?;
+            return Some((y, m));
+        }
+    }
+
+    // Handle YYYYMMDD (length 8)
+    if s.len() == 8 {
+        let y = s[0..4].parse().ok()?;
+        let m = s[4..6].parse().ok()?;
+        return Some((y, m));
+    }
+
+    None
+}
+
 struct ChannelMetaResult {
     nfo_written: usize,
     nfo_skipped: usize,
@@ -54,7 +79,7 @@ async fn write_channel_metadata(
     let mut fanart_filename: Option<String> = None;
 
     if cfg.metadata.write_thumbnails {
-        // --- Poster (avatar_uncropped) ---
+        // --- Poster ---
         let poster_base = channel_dir.join("poster");
         let existing_poster = find_existing_image(&poster_base);
         if !force && existing_poster.is_some() {
@@ -83,7 +108,7 @@ async fn write_channel_metadata(
             }
         }
 
-        // --- Fanart (banner_uncropped) ---
+        // --- Fanart ---
         let fanart_base = channel_dir.join("fanart");
         let existing_fanart = find_existing_image(&fanart_base);
         if !force && existing_fanart.is_some() {
@@ -122,7 +147,7 @@ async fn write_channel_metadata(
                 info.description.as_deref(),
                 info.channel_id.as_deref(),
                 poster_filename.as_deref(),
-                fanart_filename.as_deref(), // <-- Pass it here
+                fanart_filename.as_deref(),
             );
             match tokio::fs::write(&nfo_path, nfo).await {
                 Ok(_) => {
@@ -213,9 +238,18 @@ async fn run_scan_inner(
 
     emit_log(logs, format!("Resolving URL: {url}"));
     let info = state.ytdlp.list_channel(url, limit).await?;
-    let total = info.entries.len();
 
-    let msg = format!("Found {} videos in channel: {}", total, info.name);
+    // 1. Deduplicate entries returned by yt-dlp
+    let mut unique_entries = Vec::new();
+    let mut seen_ids = HashSet::new();
+    for entry in &info.entries {
+        if seen_ids.insert(entry.id.clone()) {
+            unique_entries.push(entry.clone());
+        }
+    }
+    let total = unique_entries.len();
+
+    let msg = format!("Found {} unique videos in channel: {}", total, info.name);
     emit_log(logs, msg.clone());
     tracing::info!(channel = %info.name, total, limit, force, mode = %mode, "channel enumerated");
 
@@ -266,19 +300,68 @@ async fn run_scan_inner(
     let scan_started = Instant::now();
     let pre_download = mode == StrmMode::Download && cfg.downloads.pre_download;
 
-    for (idx, entry) in info.entries.iter().enumerate() {
+    let mut used_titles = HashSet::new();
+
+    let mut anchor_date: Option<(i32, i32)> = None;
+    let mut current_season = 1;
+    let mut episode_in_season = 1;
+
+    // Process from oldest to newest (reverse order)
+    for idx in (0..total).rev() {
         if state.scan_cancel.load(Ordering::Relaxed) {
             emit_log(
                 logs,
-                format!("Scan cancelled by user at [{}/{}].", idx, total),
+                format!("Scan cancelled by user at [{}/{}].", total - idx, total),
             );
             break;
         }
 
-        let progress = idx + 1;
+        let entry = &unique_entries[idx];
+        let progress = total - idx;
         let video_started = Instant::now();
 
-        let episode_num = progress as u32;
+        // 1. Try to read the date from the existing NFO to avoid calling yt-dlp (for non-force rescans)
+        let mut date = None;
+        let mut cached_meta = None;
+
+        if !force {
+            if let Some(nfo_path) = existing.nfos.get(&entry.id) {
+                if let Ok(content) = tokio::fs::read_to_string(nfo_path).await {
+                    if let Some(start) = content.find("<aired>") {
+                        if let Some(end) = content[start..].find("</aired>") {
+                            let date_str = &content[start + 7..start + end];
+                            date = parse_date(Some(date_str));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. If we couldn't get the date from the NFO (or force=true), call yt-dlp
+        if date.is_none() {
+            let meta = get_video_metadata(state, entry).await;
+            date = parse_date(meta.upload_date.as_deref());
+            cached_meta = Some(meta);
+        }
+
+        if anchor_date.is_none() {
+            anchor_date = date;
+        }
+
+        let mut target_season = current_season;
+        if let (Some(anchor), Some(curr)) = (anchor_date, date) {
+            let months = (curr.0 - anchor.0) * 12 + (curr.1 - anchor.1);
+            target_season = (months / 6).max(0) as u32 + 1;
+        }
+
+        if target_season > current_season {
+            current_season = target_season;
+            episode_in_season = 1;
+        }
+
+        let season = current_season;
+        let episode = episode_in_season;
+        episode_in_season += 1;
 
         let play_url = match mode {
             StrmMode::Direct => {
@@ -294,7 +377,11 @@ async fn run_scan_inner(
             _ => format!("{base_url}/{endpoint}/{}", entry.id),
         };
 
-        let safe_title = sanitize_filename(&entry.title);
+        let mut safe_title = sanitize_filename(&entry.title);
+        if used_titles.contains(&safe_title) {
+            safe_title = format!("{} [{}]", safe_title, entry.id);
+        }
+        used_titles.insert(safe_title.clone());
 
         let new_strm_path = channel_dir.join(format!("{safe_title}.strm"));
         let strm_fresh = if force {
@@ -385,9 +472,15 @@ async fn run_scan_inner(
                         let _ = tokio::fs::remove_file(old_path).await;
                     }
                 }
-                let meta = get_video_metadata(state, entry).await;
+
+                // Use cached_meta if we already fetched it, otherwise fetch now
+                let meta = match cached_meta {
+                    Some(m) => m,
+                    None => get_video_metadata(state, entry).await,
+                };
+
                 let nfo_content =
-                    build_episode_nfo(&meta, 1, episode_num, &entry.id, thumb_filename.as_deref());
+                    build_episode_nfo(&meta, season, episode, &entry.id, thumb_filename.as_deref());
                 match tokio::fs::write(&new_nfo_path, nfo_content).await {
                     Ok(_) => {
                         nfo_written += 1;
@@ -408,13 +501,34 @@ async fn run_scan_inner(
         }
 
         let elapsed_ms = video_started.elapsed().as_millis() as u64;
-        tracing::info!(progress = %format!("{progress}/{total}"), video_id = %entry.id, elapsed_ms, "video processed");
+        tracing::info!(
+            progress = %format!("{progress}/{total}"),
+            video_id = %entry.id,
+            season = season,
+            episode = episode,
+            elapsed_ms,
+            "video processed"
+        );
 
         let msg = format!(
-            "[{}/{}] Processed: {} ({}ms)",
-            progress, total, entry.title, elapsed_ms
+            "[{}/{}] Processed: {} (S{}E{})",
+            progress, total, entry.title, season, episode
         );
         emit_log(logs, msg);
+    }
+
+    // Cleanup orphaned files (videos no longer in the channel or beyond the limit)
+    let new_ids: HashSet<String> = unique_entries.iter().map(|e| e.id.clone()).collect();
+    for (id, path) in &existing.strms {
+        if !new_ids.contains(id) {
+            let _ = tokio::fs::remove_file(path).await;
+            if let Some(nfo_path) = existing.nfos.get(id) {
+                let _ = tokio::fs::remove_file(nfo_path).await;
+            }
+            if let Some(thumb_path) = existing.thumbs.get(id) {
+                let _ = tokio::fs::remove_file(thumb_path).await;
+            }
+        }
     }
 
     let elapsed_secs = scan_started.elapsed().as_secs();

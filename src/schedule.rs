@@ -5,7 +5,11 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use axum::{extract::State, http::StatusCode, response::Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::Json,
+};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -77,24 +81,25 @@ fn try_acquire_refresh(state: &AppState) -> Option<RefreshGuard> {
     Some(RefreshGuard(state.refresh_running.clone()))
 }
 
-async fn do_refresh(state: AppState, guard: RefreshGuard) {
+async fn do_refresh(state: AppState, guard: RefreshGuard, force: bool) {
     *state.scan_running.lock().unwrap() = true;
 
     {
         let mut logs = state.scan_logs.lock().unwrap();
         logs.clear();
-        logs.push("Starting scheduled refresh for all sources...".to_string());
+        let mode_str = if force { "Forced" } else { "Scheduled" };
+        logs.push(format!("Starting {} refresh for all sources...", mode_str));
     }
 
     let cfg = state.config();
     let sources = cfg.schedule.sources.clone();
     let delay = Duration::from_secs(cfg.schedule.per_source_delay_seconds);
 
-    tracing::info!(sources = sources.len(), "scheduled refresh starting");
+    tracing::info!(sources = sources.len(), force, "refresh starting");
 
     for (i, source) in sources.iter().enumerate() {
         if state.scan_cancel.load(Ordering::Relaxed) {
-            let msg = "Scheduled refresh cancelled by user.".to_string();
+            let msg = "Refresh cancelled by user.".to_string();
             state.scan_logs.lock().unwrap().push(msg.clone());
             tracing::info!("{}", msg);
             break;
@@ -120,7 +125,7 @@ async fn do_refresh(state: AppState, guard: RefreshGuard) {
             &state,
             &source.url,
             source.limit,
-            false,
+            force,
             cfg.strm.mode,
             Some(&state.scan_logs),
         )
@@ -173,16 +178,16 @@ async fn do_refresh(state: AppState, guard: RefreshGuard) {
         .scan_logs
         .lock()
         .unwrap()
-        .push("Scheduled refresh complete.".to_string());
+        .push("Refresh complete.".to_string());
     drop(guard);
-    tracing::info!("scheduled refresh complete");
+    tracing::info!("refresh complete");
 }
 
 async fn run_scheduled_refresh(state: AppState) {
     match try_acquire_refresh(&state) {
         Some(guard) => {
             state.scan_cancel.store(false, Ordering::Relaxed);
-            do_refresh(state, guard).await
+            do_refresh(state, guard, false).await;
         }
         None => tracing::warn!("scheduled refresh skipped — previous run still in progress"),
     }
@@ -265,8 +270,13 @@ pub async fn schedule_status_handler(State(state): State<AppState>) -> Json<Valu
     }))
 }
 
-pub async fn schedule_trigger(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
+pub async fn schedule_trigger(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> (StatusCode, Json<Value>) {
+    let force = params.get("force").map(|v| v == "true").unwrap_or(false);
     let cfg = state.config();
+
     if !cfg.schedule.is_enabled() {
         return (
             StatusCode::BAD_REQUEST,
@@ -305,7 +315,7 @@ pub async fn schedule_trigger(State(state): State<AppState>) -> (StatusCode, Jso
     state.scan_cancel.store(false, Ordering::Relaxed);
 
     tokio::spawn(async move {
-        do_refresh(state_clone, guard).await;
+        do_refresh(state_clone, guard, force).await;
     });
 
     (

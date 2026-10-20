@@ -14,6 +14,7 @@ use crate::sponsorblock::SponsorBlock;
 use crate::ytdlp::Ytdlp;
 
 const RESOLVE_TTL: Duration = Duration::from_secs(300);
+const MAX_CACHE_SIZE: usize = 50; // <-- Add this
 
 #[derive(Clone)]
 pub struct ResolveCache(Arc<Mutex<HashMap<String, (Value, Instant)>>>);
@@ -36,6 +37,12 @@ impl ResolveCache {
         let json = ytdlp.resolve(&url).await?;
         {
             let mut cache = self.0.lock().unwrap();
+
+            // <-- Add this eviction logic
+            if cache.len() >= MAX_CACHE_SIZE {
+                cache.clear();
+            }
+
             cache.insert(video_id.to_string(), (json.clone(), Instant::now()));
         }
         Ok(json)
