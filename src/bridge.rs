@@ -69,52 +69,6 @@ fn is_hls(f: &Value) -> bool {
         && f.get("manifest_url").and_then(|v| v.as_str()).is_some()
 }
 
-fn all_video_variants(json: &Value) -> Vec<&Value> {
-    let Some(formats) = json.get("formats").and_then(|f| f.as_array()) else {
-        return Vec::new();
-    };
-
-    let mut by_height: HashMap<u64, &Value> = HashMap::new();
-    for f in formats {
-        if !is_hls(f) {
-            continue;
-        }
-        let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("none");
-        if vcodec == "none" {
-            continue;
-        }
-        let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("none");
-        if acodec != "none" {
-            continue;
-        }
-        let height = f.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-        if height == 0 {
-            continue;
-        }
-
-        let is_avc = vcodec.starts_with("avc1");
-        match by_height.get(&height) {
-            None => {
-                by_height.insert(height, f);
-            }
-            Some(existing) => {
-                let existing_avc = existing
-                    .get("vcodec")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.starts_with("avc1"))
-                    .unwrap_or(false);
-                if is_avc && !existing_avc {
-                    by_height.insert(height, f);
-                }
-            }
-        }
-    }
-
-    let mut variants: Vec<&Value> = by_height.into_values().collect();
-    variants.sort_by_key(|f| f.get("height").and_then(|v| v.as_u64()).unwrap_or(0));
-    variants
-}
-
 #[derive(Debug, Deserialize)]
 pub struct MediaQuery {
     fmt: Option<String>,
@@ -230,14 +184,24 @@ async fn build_master_body(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
 
-    let variants = all_video_variants(&json);
-    if variants.is_empty() {
-        return Err((StatusCode::NOT_FOUND, "no HLS video formats".to_string()));
-    }
+    let video_fmt = StreamKind::Video
+        .best(&json)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "no HLS video format".to_string()))?;
 
     let audio_fmt = StreamKind::Audio
         .best(&json)
         .ok_or_else(|| (StatusCode::NOT_FOUND, "no HLS audio format".to_string()))?;
+
+    let video_format_id = video_fmt
+        .get("format_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "video format missing id".to_string(),
+            )
+        })?;
+
     let audio_format_id = audio_fmt
         .get("format_id")
         .and_then(|v| v.as_str())
@@ -247,57 +211,39 @@ async fn build_master_body(
                 "audio format missing id".to_string(),
             )
         })?;
+
+    let vcodec = video_fmt
+        .get("vcodec")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let acodec = audio_fmt
         .get("acodec")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    let height = video_fmt
+        .get("height")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1080);
+    let width = video_fmt
+        .get("width")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1920);
+
+    let bandwidth = video_fmt
+        .get("tbr")
+        .and_then(|v| v.as_f64())
+        .map(|tbr| (tbr * 1000.0) as u64)
+        .unwrap_or(5_000_000);
+
     let base = format!("/bridge/{video_id}");
-    let mut body = String::new();
-    body.push_str("#EXTM3U\n");
-    body.push_str("#EXT-X-VERSION:3\n");
-    body.push_str(&format!(
-        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"main\",DEFAULT=YES,AUTOSELECT=YES,URI=\"{base}/audio.m3u8?fmt={audio_format_id}\"\n"
-    ));
-
-    for v in &variants {
-        let Some(video_format_id) = v.get("format_id").and_then(|x| x.as_str()) else {
-            continue;
-        };
-        let vcodec = v.get("vcodec").and_then(|x| x.as_str()).unwrap_or("");
-        let height = v.get("height").and_then(|x| x.as_u64()).unwrap_or(0);
-        let width = v.get("width").and_then(|x| x.as_u64()).unwrap_or(0);
-
-        let bandwidth = v
-            .get("tbr")
-            .and_then(|x| x.as_f64())
-            .map(|tbr| (tbr * 1000.0) as u64)
-            .filter(|b| *b > 0)
-            .unwrap_or_else(|| match height {
-                h if h >= 2160 => 20_000_000,
-                h if h >= 1440 => 10_000_000,
-                h if h >= 1080 => 5_000_000,
-                h if h >= 720 => 2_500_000,
-                _ => 1_000_000,
-            });
-
-        let resolution = if width > 0 && height > 0 {
-            format!(",RESOLUTION={width}x{height}")
-        } else {
-            String::new()
-        };
-
-        let codecs = if !vcodec.is_empty() && !acodec.is_empty() {
-            format!(",CODECS=\"{vcodec},{acodec}\"")
-        } else {
-            String::new()
-        };
-
-        body.push_str(&format!(
-            "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth}{resolution}{codecs},AUDIO=\"aud\"\n\
-             {base}/video.m3u8?fmt={video_format_id}\n"
-        ));
-    }
+    let body = format!(
+        "#EXTM3U\n\
+         #EXT-X-VERSION:3\n\
+         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"main\",DEFAULT=YES,AUTOSELECT=YES,URI=\"{base}/audio.m3u8?fmt={audio_format_id}\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION={width}x{height},CODECS=\"{vcodec},{acodec}\",AUDIO=\"aud\"\n\
+         {base}/video.m3u8?fmt={video_format_id}\n"
+    );
 
     state.playlist_cache.set(cache_key, body.clone());
     write_cache_file(&state.cache_dir, &disk_filename, &body).await;
@@ -316,6 +262,7 @@ pub async fn bridge_master(
         .fetch_add(1, Ordering::Relaxed);
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+        .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(body))
         .unwrap())
 }
@@ -331,6 +278,7 @@ pub async fn play_alias(
         .fetch_add(1, Ordering::Relaxed);
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+        .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(body))
         .unwrap())
 }
@@ -349,6 +297,7 @@ pub async fn bridge_video(
         .fetch_add(1, Ordering::Relaxed);
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+        .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(body))
         .unwrap())
 }
@@ -367,6 +316,7 @@ pub async fn bridge_audio(
         .fetch_add(1, Ordering::Relaxed);
     Ok(Response::builder()
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
+        .header(header::CACHE_CONTROL, "no-cache")
         .body(Body::from(body))
         .unwrap())
 }
@@ -419,16 +369,9 @@ pub async fn bridge_segment(
         .segments_proxied
         .fetch_add(1, Ordering::Relaxed);
 
-    let content_type = resp
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
-
     let mut builder = Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, content_type);
+        .header(header::CONTENT_TYPE, "video/mp2t");
 
     for h in [
         reqwest::header::CONTENT_LENGTH,
