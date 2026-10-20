@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use url::Url;
 
 #[derive(Debug, Clone)]
@@ -8,6 +10,7 @@ pub struct SponsorBlock {
     client: reqwest::Client,
     api_base: String,
     categories: Vec<String>,
+    cache: Arc<Mutex<HashMap<String, (Vec<Segment>, Instant)>>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -21,7 +24,6 @@ struct RawSegment {
     action_type: Option<String>,
 }
 
-/// A single skip interval, in seconds.
 #[derive(Debug, Clone)]
 pub struct Segment {
     pub start: f64,
@@ -30,7 +32,6 @@ pub struct Segment {
 }
 
 impl Segment {
-    /// True if this segment overlaps the half-open interval `[t0, t1)`.
     pub fn overlaps(&self, t0: f64, t1: f64) -> bool {
         t0 < self.end && t1 > self.start
     }
@@ -40,13 +41,14 @@ impl SponsorBlock {
     pub fn new(categories: Vec<String>, api_base: Option<String>) -> Self {
         Self {
             client: reqwest::Client::builder()
-                .user_agent("ytdlp2strm/0.1 (+https://github.com/yourname/ytdlp2strm)")
+                .user_agent("ytdlp2strm/0.1")
                 .connect_timeout(Duration::from_secs(5))
                 .timeout(Duration::from_secs(10))
                 .build()
                 .expect("sponsorblock HTTP client"),
             api_base: api_base.unwrap_or_else(|| "https://sponsor.ajay.app".to_string()),
             categories,
+            cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -58,11 +60,18 @@ impl SponsorBlock {
         !self.categories.is_empty()
     }
 
-    /// Fetch skip segments for a video. Returns an empty Vec if SponsorBlock
-    /// has no data (404) — common for new, niche, or unsubmitted videos.
     pub async fn fetch(&self, video_id: &str) -> Result<Vec<Segment>> {
         if !self.is_enabled() {
             return Ok(Vec::new());
+        }
+
+        {
+            let cache = self.cache.lock().unwrap();
+            if let Some((segments, ts)) = cache.get(video_id) {
+                if ts.elapsed() < Duration::from_secs(86400) {
+                    return Ok(segments.clone());
+                }
+            }
         }
 
         let cats_json = serde_json::to_string(&self.categories)?;
@@ -85,8 +94,13 @@ impl SponsorBlock {
             .context("SponsorBlock request failed")?;
 
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            self.cache
+                .lock()
+                .unwrap()
+                .insert(video_id.to_string(), (Vec::new(), Instant::now()));
             return Ok(Vec::new());
         }
+
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -104,7 +118,7 @@ impl SponsorBlock {
             )
         })?;
 
-        Ok(raw
+        let segments: Vec<Segment> = raw
             .into_iter()
             .filter(|s| s.action_type.as_deref().unwrap_or("skip") == "skip")
             .map(|s| Segment {
@@ -112,6 +126,13 @@ impl SponsorBlock {
                 end: s.segment[1],
                 category: s.category,
             })
-            .collect())
+            .collect();
+
+        self.cache
+            .lock()
+            .unwrap()
+            .insert(video_id.to_string(), (segments.clone(), Instant::now()));
+
+        Ok(segments)
     }
 }

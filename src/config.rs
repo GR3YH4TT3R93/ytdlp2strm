@@ -17,6 +17,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub downloads: DownloadsConfig,
     #[serde(default)]
+    pub cache: CacheConfig,
+    #[serde(default)]
     pub metadata: MetadataConfig,
     #[serde(default)]
     pub state: StateConfig,
@@ -81,6 +83,7 @@ pub enum StrmMode {
     #[default]
     Stream,
     Download,
+    Direct,
 }
 
 impl std::fmt::Display for StrmMode {
@@ -88,6 +91,7 @@ impl std::fmt::Display for StrmMode {
         match self {
             StrmMode::Stream => f.write_str("stream"),
             StrmMode::Download => f.write_str("download"),
+            StrmMode::Direct => f.write_str("direct"),
         }
     }
 }
@@ -144,6 +148,31 @@ impl Default for DownloadsConfig {
             retention_days: default_retention_days(),
             pre_download: false,
             concurrency: default_concurrency(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct CacheConfig {
+    #[serde(default = "default_cache_dir")]
+    pub dir: PathBuf,
+    #[serde(default = "default_cache_ttl")]
+    pub ttl_hours: u64,
+}
+
+fn default_cache_dir() -> PathBuf {
+    PathBuf::from("./cache")
+}
+
+fn default_cache_ttl() -> u64 {
+    6
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            dir: default_cache_dir(),
+            ttl_hours: default_cache_ttl(),
         }
     }
 }

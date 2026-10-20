@@ -192,6 +192,7 @@ async fn run_scan_inner(
     let endpoint = match mode {
         StrmMode::Stream => "play",
         StrmMode::Download => "download",
+        StrmMode::Direct => "direct",
     };
 
     let channel_dir = cfg.strm.output_dir.join(sanitize_filename(&info.name));
@@ -235,14 +236,35 @@ async fn run_scan_inner(
     let pre_download = mode == StrmMode::Download && cfg.downloads.pre_download;
 
     for (idx, entry) in info.entries.iter().enumerate() {
+        if state.scan_cancel.load(Ordering::Relaxed) {
+            emit_log(
+                logs,
+                format!("Scan cancelled by user at [{}/{}].", idx, total),
+            );
+            break;
+        }
+
         let progress = idx + 1;
         let video_started = Instant::now();
 
         let episode_num = progress as u32;
-        let play_url = format!("{base_url}/{endpoint}/{}", entry.id);
+
+        let play_url = match mode {
+            StrmMode::Direct => {
+                let format = "best";
+                state
+                    .ytdlp
+                    .stream_url(
+                        format,
+                        &format!("https://www.youtube.com/watch?v={}", entry.id),
+                    )
+                    .await?
+            }
+            _ => format!("{base_url}/{endpoint}/{}", entry.id),
+        };
+
         let safe_title = sanitize_filename(&entry.title);
 
-        // --- STRM ---
         let new_strm_path = channel_dir.join(format!("{safe_title}.strm"));
         let strm_fresh = if force {
             false
@@ -278,7 +300,6 @@ async fn run_scan_inner(
             }
         }
 
-        // --- Thumbnail (before NFO) ---
         let mut thumb_filename: Option<String> = None;
         let mut thumb_changed = false;
         if cfg.metadata.write_thumbnails {
@@ -315,7 +336,6 @@ async fn run_scan_inner(
             }
         }
 
-        // --- NFO (after thumbnail) ---
         if cfg.metadata.write_nfo {
             let new_nfo_path = channel_dir.join(format!("{safe_title}.nfo"));
             let nfo_fresh = if force || thumb_changed {
@@ -383,7 +403,7 @@ async fn run_scan_inner(
     );
 
     let summary = format!(
-        "Scan complete in {}s! {} STRMs written, {} skipped, {} failed.",
+        "Scan stopped or complete in {}s! {} STRMs written, {} skipped, {} failed.",
         elapsed_secs,
         strm_written,
         strm_skipped,
@@ -407,8 +427,6 @@ async fn run_scan_inner(
         failures,
     })
 }
-
-// --- HTTP endpoints ---
 
 #[derive(Debug, Deserialize)]
 pub struct ScanRequest {
@@ -500,6 +518,8 @@ pub async fn scan_background(
         logs.clear();
     }
 
+    state.scan_cancel.store(false, Ordering::Relaxed);
+
     if req.add_to_schedule {
         match crate::handlers::add_schedule_source(&state, &req.url, limit).await {
             Ok(true) => emit_log(
@@ -536,6 +556,11 @@ pub async fn scan_background(
     });
 
     Ok(Json(json!({"status": "started"})))
+}
+
+pub async fn stop_scan(State(state): State<AppState>) -> Json<Value> {
+    state.scan_cancel.store(true, Ordering::Relaxed);
+    Json(json!({"status": "stopping"}))
 }
 
 pub async fn get_scan_logs(State(state): State<AppState>) -> Json<Value> {

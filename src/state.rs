@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -41,6 +42,30 @@ impl ResolveCache {
     }
 }
 
+#[derive(Clone)]
+pub struct PlaylistCache(Arc<Mutex<HashMap<String, (String, Instant)>>>);
+
+impl PlaylistCache {
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(HashMap::new())))
+    }
+
+    pub fn get(&self, key: &str) -> Option<String> {
+        let cache = self.0.lock().unwrap();
+        if let Some((val, ts)) = cache.get(key) {
+            if ts.elapsed() < Duration::from_secs(7200) {
+                return Some(val.clone());
+            }
+        }
+        None
+    }
+
+    pub fn set(&self, key: String, val: String) {
+        let mut cache = self.0.lock().unwrap();
+        cache.insert(key, (val, Instant::now()));
+    }
+}
+
 #[derive(Default)]
 pub struct Metrics {
     pub scans_started: AtomicU64,
@@ -68,14 +93,17 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub sponsorblock: SponsorBlock,
     pub resolve_cache: ResolveCache,
+    pub playlist_cache: PlaylistCache,
+    pub cache_dir: PathBuf,
+    pub cache_ttl: Duration,
     pub schedule_status: Arc<Mutex<ScheduleStatus>>,
     pub refresh_running: Arc<Mutex<bool>>,
     pub metrics: Arc<Metrics>,
     pub video_locks: VideoLocks,
     pub download_sem: Arc<Semaphore>,
-    // New fields for live scan UI
     pub scan_logs: Arc<Mutex<Vec<String>>>,
     pub scan_running: Arc<Mutex<bool>>,
+    pub scan_cancel: Arc<AtomicBool>,
 }
 
 impl AppState {

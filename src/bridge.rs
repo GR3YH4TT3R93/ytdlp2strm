@@ -6,11 +6,12 @@ use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode, header},
-    response::Response,
+    response::{IntoResponse, Redirect, Response},
 };
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::files::{read_cache_file, write_cache_file};
 use crate::hls;
 use crate::state::AppState;
 
@@ -44,12 +45,12 @@ impl StreamKind {
 
         candidates.sort_by_key(|f| match self {
             StreamKind::Video => {
+                let h = f.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
                 let is_avc = f
                     .get("vcodec")
                     .and_then(|v| v.as_str())
                     .map_or(false, |v| v.starts_with("avc1")) as u64;
-                let h = f.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-                (is_avc, h)
+                (h, is_avc)
             }
             StreamKind::Audio => {
                 let abr = f.get("abr").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -119,12 +120,46 @@ pub struct MediaQuery {
     fmt: Option<String>,
 }
 
+pub async fn direct_redirect(
+    AxumPath(video_id): AxumPath<String>,
+    State(state): State<AppState>,
+) -> Result<Response, (StatusCode, String)> {
+    let cache_key = format!("direct_{}", video_id);
+
+    if let Some(url) = state.playlist_cache.get(&cache_key) {
+        return Ok(Redirect::temporary(&url).into_response());
+    }
+
+    let format = "best";
+    let video_url = format!("https://www.youtube.com/watch?v={video_id}");
+    let url = state
+        .ytdlp
+        .stream_url(format, &video_url)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("yt-dlp failed: {e}")))?;
+
+    state.playlist_cache.set(cache_key, url.clone());
+    Ok(Redirect::temporary(&url).into_response())
+}
+
 async fn build_filtered_playlist(
     state: &AppState,
     video_id: &str,
     kind: StreamKind,
     forced_format_id: Option<&str>,
 ) -> anyhow::Result<String> {
+    let cache_key = format!("playlist_{:?}_{:?}", video_id, forced_format_id);
+
+    if let Some(cached) = state.playlist_cache.get(&cache_key) {
+        return Ok(cached);
+    }
+
+    let disk_filename = format!("playlist_{}_{:?}.m3u8", video_id, kind);
+    if let Some(cached) = read_cache_file(&state.cache_dir, &disk_filename, state.cache_ttl).await {
+        state.playlist_cache.set(cache_key, cached.clone());
+        return Ok(cached);
+    }
+
     let json = state
         .resolve_cache
         .get_or_resolve(&state.ytdlp, video_id)
@@ -133,65 +168,62 @@ async fn build_filtered_playlist(
     let format_id: String = if let Some(fid) = forced_format_id {
         fid.to_string()
     } else {
-        let fmt = kind.best(&json).ok_or_else(|| {
-            let total = json
-                .get("formats")
-                .and_then(|f| f.as_array())
-                .map_or(0, |a| a.len());
-            let hls = json
-                .get("formats")
-                .and_then(|f| f.as_array())
-                .map(|a| a.iter().filter(|f| is_hls(f)).count())
-                .unwrap_or(0);
-            anyhow!(
-                "no HLS {kind:?} format for {video_id} \
-                 (total={total} formats, {hls} HLS with manifest)"
-            )
-        })?;
+        let fmt = kind
+            .best(&json)
+            .ok_or_else(|| anyhow!("no HLS {kind:?} format"))?;
         fmt.get("format_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("format missing format_id"))?
+            .unwrap_or("")
             .to_string()
     };
 
     let video_url = format!("https://www.youtube.com/watch?v={video_id}");
-    let media_manifest_url = state.ytdlp.stream_url(&format_id, &video_url).await?;
 
-    let (playlist, raw_source, media_url) =
-        hls::fetch_media_playlist(&state.http, &media_manifest_url).await?;
+    let url_cache_key = format!("streamurl_{}", format_id);
+    let media_manifest_url = if let Some(cached_url) = state.playlist_cache.get(&url_cache_key) {
+        cached_url
+    } else {
+        let url = state.ytdlp.stream_url(&format_id, &video_url).await?;
+        state.playlist_cache.set(url_cache_key, url.clone());
+        url
+    };
 
-    let skips = state
-        .sponsorblock
-        .fetch(video_id)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(video_id, error = %e, "SponsorBlock fetch failed; serving unfiltered");
-            Vec::new()
-        });
-
-    if !skips.is_empty() {
-        state
-            .metrics
-            .sb_skips_applied
-            .fetch_add(skips.len() as u64, Ordering::Relaxed);
-    }
-
-    tracing::info!(
-        video_id, ?kind, format_id = %format_id,
-        total_segments = playlist.segments.len(),
-        skip_intervals = skips.len(),
-        forced = forced_format_id.is_some(),
-        "filtering playlist"
+    let (manifest_result, skips_result) = tokio::join!(
+        hls::fetch_media_playlist(&state.http, &media_manifest_url),
+        state.sponsorblock.fetch(video_id)
     );
 
+    let (playlist, raw_source, media_url) = manifest_result?;
+    let skips = skips_result.unwrap_or_else(|e| {
+        tracing::warn!(video_id, error = %e, "SponsorBlock fetch failed; serving unfiltered");
+        Vec::new()
+    });
+
     let proxy = format!("/bridge/{video_id}/segment");
-    hls::filter_and_rewrite(&playlist, &raw_source, &media_url, &skips, &proxy)
+    let filtered = hls::filter_and_rewrite(&playlist, &raw_source, &media_url, &skips, &proxy)?;
+
+    state.playlist_cache.set(cache_key, filtered.clone());
+    write_cache_file(&state.cache_dir, &disk_filename, &filtered).await;
+
+    Ok(filtered)
 }
 
 async fn build_master_body(
     state: &AppState,
     video_id: &str,
 ) -> Result<String, (StatusCode, String)> {
+    let cache_key = format!("master_{}", video_id);
+
+    if let Some(cached) = state.playlist_cache.get(&cache_key) {
+        return Ok(cached);
+    }
+
+    let disk_filename = format!("master_{}.m3u8", video_id);
+    if let Some(cached) = read_cache_file(&state.cache_dir, &disk_filename, state.cache_ttl).await {
+        state.playlist_cache.set(cache_key, cached.clone());
+        return Ok(cached);
+    }
+
     let json = state
         .resolve_cache
         .get_or_resolve(&state.ytdlp, video_id)
@@ -241,7 +273,13 @@ async fn build_master_body(
             .and_then(|x| x.as_f64())
             .map(|tbr| (tbr * 1000.0) as u64)
             .filter(|b| *b > 0)
-            .unwrap_or_else(|| height.max(360) * 5000);
+            .unwrap_or_else(|| match height {
+                h if h >= 2160 => 20_000_000,
+                h if h >= 1440 => 10_000_000,
+                h if h >= 1080 => 5_000_000,
+                h if h >= 720 => 2_500_000,
+                _ => 1_000_000,
+            });
 
         let resolution = if width > 0 && height > 0 {
             format!(",RESOLUTION={width}x{height}")
@@ -260,6 +298,9 @@ async fn build_master_body(
              {base}/video.m3u8?fmt={video_format_id}\n"
         ));
     }
+
+    state.playlist_cache.set(cache_key, body.clone());
+    write_cache_file(&state.cache_dir, &disk_filename, &body).await;
 
     Ok(body)
 }

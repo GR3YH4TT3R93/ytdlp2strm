@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 use tokio::fs;
 
 use crate::images::IMAGE_EXTS;
@@ -49,7 +50,6 @@ pub async fn scan_existing_files(dir: &Path) -> ExistingFiles {
             continue;
         };
         if let Some(stem) = name.strip_suffix(".strm") {
-            // Read the .strm file to extract the video ID from the URL
             if let Ok(content) = fs::read_to_string(&path).await {
                 let content = content.trim();
                 if let Some(id) = content.split('/').last() {
@@ -57,13 +57,11 @@ pub async fn scan_existing_files(dir: &Path) -> ExistingFiles {
                         let id = id.to_string();
                         result.strms.insert(id.clone(), path);
 
-                        // Look for matching NFO
                         let nfo_path = dir.join(format!("{stem}.nfo"));
                         if nfo_path.exists() {
                             result.nfos.insert(id.clone(), nfo_path);
                         }
 
-                        // Look for matching Thumbnail
                         for ext in IMAGE_EXTS {
                             let thumb_path = dir.join(format!("{stem}-thumb.{ext}"));
                             if thumb_path.exists() {
@@ -98,11 +96,31 @@ pub fn sanitize_filename(s: &str) -> String {
     }
 }
 
-pub async fn move_directory(from: &Path, to: &Path) -> anyhow::Result<()> {
-    if from == to {
-        return Ok(());
+pub async fn read_cache_file(cache_dir: &Path, filename: &str, ttl: Duration) -> Option<String> {
+    let path = cache_dir.join(filename);
+    let meta = fs::metadata(&path).await.ok()?;
+    let modified = meta.modified().ok()?;
+
+    if let Ok(age) = SystemTime::now().duration_since(modified) {
+        if age > ttl {
+            return None;
+        }
+    } else {
+        return None;
     }
-    if !from.exists() {
+
+    fs::read_to_string(&path).await.ok()
+}
+
+pub async fn write_cache_file(cache_dir: &Path, filename: &str, content: &str) {
+    let path = cache_dir.join(filename);
+    if let Err(e) = fs::write(&path, content).await {
+        tracing::warn!(path = %path.display(), error = %e, "failed to write cache file");
+    }
+}
+
+pub async fn move_directory(from: &Path, to: &Path) -> anyhow::Result<()> {
+    if from == to || !from.exists() {
         return Ok(());
     }
 
@@ -111,26 +129,33 @@ pub async fn move_directory(from: &Path, to: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    tracing::info!(from = %from.display(), to = %to.display(), "cross-device move detected, copying...");
-    fs::create_dir_all(to).await?;
-    copy_dir_all(from, to).await?;
-    fs::remove_dir_all(from).await?;
+    tracing::info!(from = %from.display(), to = %to.display(), "cross-device move detected, copying in background...");
+
+    let from = from.to_path_buf();
+    let to = to.to_path_buf();
+
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&to)?;
+        copy_dir_all_blocking(&from, &to)?;
+        let _ = std::fs::remove_dir_all(&from);
+        Ok::<(), std::io::Error>(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Task join error: {e}"))??;
+
+    tracing::info!("directory move complete");
     Ok(())
 }
 
-async fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
-    fs::create_dir_all(&dst).await?;
-    let mut rd = fs::read_dir(src).await?;
-    while let Some(entry) = rd.next_entry().await? {
-        let ty = entry.file_type().await?;
+fn copy_dir_all_blocking(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
         if ty.is_dir() {
-            Box::pin(copy_dir_all(
-                entry.path(),
-                dst.as_ref().join(entry.file_name()),
-            ))
-            .await?;
+            copy_dir_all_blocking(&entry.path(), &dst.join(entry.file_name()))?;
         } else {
-            fs::copy(entry.path(), dst.as_ref().join(entry.file_name())).await?;
+            std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
         }
     }
     Ok(())

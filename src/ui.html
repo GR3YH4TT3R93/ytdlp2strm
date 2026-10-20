@@ -150,6 +150,31 @@
         button.primary:hover { background-color: var(--accent-hover); }
         button.primary:disabled { opacity: 0.7; cursor: not-allowed; }
 
+        button.secondary {
+            width: 100%;
+            padding: 0.75rem;
+            background-color: var(--border);
+            color: var(--text-main);
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            margin-top: 1rem;
+        }
+        button.secondary:hover { background-color: #475569; }
+        button.secondary:disabled { opacity: 0.7; cursor: not-allowed; }
+
+        button.danger {
+            background-color: var(--error);
+            color: white;
+            margin-top: 0;
+        }
+        button.danger:hover { background-color: #dc2626; }
+
+        .btn-row { display: flex; gap: 0.5rem; margin-top: 1rem; }
+        .btn-row button { margin-top: 0; }
+
         .status-box {
             background-color: var(--bg-input);
             padding: 1rem;
@@ -269,10 +294,17 @@
                                 <input type="text" id="cfg_downloads_output_dir">
                             </div>
                         </div>
-                        <div class="form-group">
-                            <label>Binaries Dir</label>
-                            <small>Where portable yt-dlp and ffmpeg are stored.</small>
-                            <input type="text" id="cfg_deps_bin_dir">
+                        <div class="form-grid">
+                            <div class="form-group">
+                                <label>Binaries Dir</label>
+                                <small>Where portable yt-dlp and ffmpeg are stored.</small>
+                                <input type="text" id="cfg_deps_bin_dir">
+                            </div>
+                            <div class="form-group">
+                                <label>Cache Dir</label>
+                                <small>Where HLS playlists and SB segments are cached.</small>
+                                <input type="text" id="cfg_cache_dir">
+                            </div>
                         </div>
                     </div>
 
@@ -280,11 +312,16 @@
                         <h3>Playback Mode</h3>
                         <div class="form-group">
                             <label>Default STRM Mode</label>
-                            <small>"stream" for HLS bridging (no disk use), "download" for local caching.</small>
+                            <small>How playback is handled.</small>
                             <select id="cfg_strm_mode">
-                                <option value="stream">Stream</option>
-                                <option value="download">Download</option>
+                                <option value="stream">Stream (Proxy + SponsorBlock)</option>
+                                <option value="download">Download (Cache to disk)</option>
+                                <option value="direct">Direct (No Proxy, Pure Speed)</option>
                             </select>
+                        </div>
+                        <div class="checkbox-group">
+                            <input type="checkbox" id="cfg_downloads_pre_download">
+                            <label for="cfg_downloads_pre_download">Pre-download videos in background (Download Mode only)</label>
                         </div>
                     </div>
                 </form>
@@ -319,6 +356,7 @@
                                     <option value="">Default</option>
                                     <option value="stream">Stream</option>
                                     <option value="download">Download</option>
+                                    <option value="direct">Direct</option>
                                 </select>
                             </div>
                         </div>
@@ -330,7 +368,10 @@
                             <input type="checkbox" id="scan-add-to-schedule">
                             <label for="scan-add-to-schedule">Add to Auto-Schedule</label>
                         </div>
-                        <button type="submit" class="primary" id="scan-btn">Start Scan</button>
+                        <div class="btn-row">
+                            <button type="submit" class="primary" id="scan-btn" style="flex: 2;">Start Scan</button>
+                            <button type="button" class="danger" id="stop-scan-btn" style="flex: 1; display: none;" onclick="stopScan()">Stop</button>
+                        </div>
                     </form>
 
                     <div id="scan-output" class="terminal-box"></div>
@@ -341,6 +382,7 @@
                 <div class="panel-header"><h2>Schedule Status</h2></div>
                 <div class="panel-body">
                     <div id="schedule-status" class="status-box">Loading...</div>
+                    <button id="trigger-schedule-btn" class="secondary" onclick="triggerSchedule()">Run Scheduled Scans</button>
                 </div>
             </div>
         </div>
@@ -392,7 +434,9 @@
                 document.getElementById('cfg_strm_output_dir').value = fullConfig.strm.output_dir;
                 document.getElementById('cfg_downloads_output_dir').value = fullConfig.downloads.output_dir;
                 document.getElementById('cfg_deps_bin_dir').value = fullConfig.deps.bin_dir;
+                document.getElementById('cfg_cache_dir').value = fullConfig.cache.dir;
                 document.getElementById('cfg_strm_mode').value = fullConfig.strm.mode;
+                document.getElementById('cfg_downloads_pre_download').checked = fullConfig.downloads.pre_download;
             } catch (e) {
                 showToast("Error loading config: " + e.message, true);
                 console.error("loadConfig error:", e);
@@ -416,7 +460,9 @@
                 fullConfig.strm.output_dir = document.getElementById('cfg_strm_output_dir').value;
                 fullConfig.downloads.output_dir = document.getElementById('cfg_downloads_output_dir').value;
                 fullConfig.deps.bin_dir = document.getElementById('cfg_deps_bin_dir').value;
+                fullConfig.cache.dir = document.getElementById('cfg_cache_dir').value;
                 fullConfig.strm.mode = document.getElementById('cfg_strm_mode').value;
+                fullConfig.downloads.pre_download = document.getElementById('cfg_downloads_pre_download').checked;
                 payload = fullConfig;
             } else {
                 payload = { toml: document.getElementById('config-editor').value };
@@ -447,14 +493,45 @@
             }
         }
 
-        async function triggerScan() {
-            const btn = document.getElementById('scan-btn');
+        function startLogPolling() {
+            const stopBtn = document.getElementById('stop-scan-btn');
             const outputBox = document.getElementById('scan-output');
 
-            btn.disabled = true;
-            btn.textContent = "Scanning...";
             outputBox.style.display = 'block';
-            outputBox.textContent = "Connecting to server...\n";
+            stopBtn.style.display = 'block';
+            stopBtn.disabled = false;
+            stopBtn.textContent = "Stop";
+
+            if (scanPollInterval) clearInterval(scanPollInterval);
+            scanPollInterval = setInterval(async () => {
+                try {
+                    const logRes = await fetch('/scan/logs');
+                    const logData = await logRes.json();
+
+                    outputBox.textContent = logData.logs.join('\n');
+                    outputBox.scrollTop = outputBox.scrollHeight;
+
+                    if (!logData.running) {
+                        clearInterval(scanPollInterval);
+                        scanPollInterval = null;
+                        stopBtn.style.display = 'none';
+                        showToast("Scan finished");
+                        loadStatus();
+                    }
+                } catch (e) {
+                    outputBox.textContent += `\n[Connection Error: ${e.message}]`;
+                    clearInterval(scanPollInterval);
+                    scanPollInterval = null;
+                    stopBtn.style.display = 'none';
+                }
+            }, 500);
+        }
+
+        async function triggerScan() {
+            const btn = document.getElementById('scan-btn');
+
+            btn.disabled = true;
+            btn.textContent = "Starting...";
 
             const url = document.getElementById('scan-url').value;
             const limit = parseInt(document.getElementById('scan-limit').value);
@@ -476,41 +553,61 @@
                 let data = {};
                 try { data = JSON.parse(text); } catch (e) { data = { error: text }; }
 
-                if (!res.ok) throw new Error(data.error || "Scan failed to start (HTTP " + res.status + ")");
+                if (!res.ok) throw new Error(data.error || "Scan failed to start");
 
-                outputBox.textContent += "Scan started in background...\n";
                 showToast("Scan started");
-
-                if (scanPollInterval) clearInterval(scanPollInterval);
-                scanPollInterval = setInterval(async () => {
-                    try {
-                        const logRes = await fetch('/scan/logs');
-                        const logData = await logRes.json();
-
-                        outputBox.textContent = logData.logs.join('\n');
-                        outputBox.scrollTop = outputBox.scrollHeight;
-
-                        if (!logData.running) {
-                            clearInterval(scanPollInterval);
-                            scanPollInterval = null;
-                            btn.disabled = false;
-                            btn.textContent = "Start Scan";
-                            showToast("Scan finished");
-                        }
-                    } catch (e) {
-                        outputBox.textContent += `\n[Connection Error: ${e.message}]`;
-                        clearInterval(scanPollInterval);
-                        scanPollInterval = null;
-                        btn.disabled = false;
-                        btn.textContent = "Start Scan";
-                    }
-                }, 500);
+                btn.textContent = "Scanning...";
+                startLogPolling();
 
             } catch (e) {
                 showToast(e.message, true);
                 btn.disabled = false;
                 btn.textContent = "Start Scan";
-                outputBox.textContent += `\nError: ${e.message}`;
+                document.getElementById('scan-output').textContent = `Error: ${e.message}`;
+            }
+        }
+
+        async function stopScan() {
+            const stopBtn = document.getElementById('stop-scan-btn');
+            stopBtn.disabled = true;
+            stopBtn.textContent = "Stopping...";
+
+            try {
+                await fetch('/scan/stop', { method: 'POST' });
+                showToast("Stop signal sent. Finishing current video...");
+            } catch (e) {
+                showToast("Failed to send stop signal", true);
+                stopBtn.disabled = false;
+                stopBtn.textContent = "Stop";
+            }
+        }
+
+        async function triggerSchedule() {
+            const btn = document.getElementById('trigger-schedule-btn');
+            btn.disabled = true;
+            btn.textContent = "Starting...";
+
+            try {
+                const res = await fetch('/schedule/trigger', { method: 'POST' });
+                if (res.status === 202) {
+                    showToast("Scheduled scans started.");
+                    startLogPolling();
+                } else if (res.status === 409) {
+                    const data = await res.json();
+                    showToast(data.reason || "A scan is already running.", true);
+                } else if (res.status === 400) {
+                    const data = await res.json();
+                    showToast(data.reason || "Scheduler is disabled.", true);
+                } else {
+                    const text = await res.text();
+                    throw new Error(text || "Failed to trigger schedule");
+                }
+                setTimeout(loadStatus, 1000);
+            } catch (e) {
+                showToast("Error: " + e.message, true);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "Run Scheduled Scans";
             }
         }
 
@@ -523,6 +620,10 @@
                 if (!data.enabled) {
                     container.innerHTML = "Scheduler is disabled in config.";
                     return;
+                }
+
+                if (data.currently_refreshing && !scanPollInterval) {
+                    startLogPolling();
                 }
 
                 let html = `<div><strong>Scheduler:</strong> Enabled (<code>${data.refresh_cron}</code>)</div>`;

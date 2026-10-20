@@ -16,6 +16,7 @@ mod ytdlp;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -31,7 +32,7 @@ use tokio::sync::Semaphore;
 
 use crate::config::AppConfig;
 use crate::sponsorblock::SponsorBlock;
-use crate::state::{AppState, Metrics, ResolveCache};
+use crate::state::{AppState, Metrics, PlaylistCache, ResolveCache};
 use crate::ytdlp::Ytdlp;
 
 #[derive(Parser, Debug)]
@@ -171,6 +172,12 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("creating downloads dir at {}", downloads_dir.display()))?;
     let download_concurrency = config.downloads.concurrency.max(1);
 
+    let cache_dir = config.cache.dir.clone();
+    tokio::fs::create_dir_all(&cache_dir)
+        .await
+        .with_context(|| format!("creating cache dir at {}", cache_dir.display()))?;
+    let cache_ttl = Duration::from_secs(config.cache.ttl_hours * 3600);
+
     let schedule_status_path = config.state.schedule_file.clone();
     let schedule_status = schedule::load_schedule_status(&schedule_status_path).await;
 
@@ -180,6 +187,9 @@ async fn main() -> anyhow::Result<()> {
         http,
         sponsorblock,
         resolve_cache: ResolveCache::new(),
+        playlist_cache: PlaylistCache::new(),
+        cache_dir,
+        cache_ttl,
         schedule_status: Arc::new(Mutex::new(schedule_status)),
         refresh_running: Arc::new(Mutex::new(false)),
         metrics: Arc::new(Metrics::default()),
@@ -187,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
         download_sem: Arc::new(Semaphore::new(download_concurrency)),
         scan_logs: Arc::new(Mutex::new(Vec::new())),
         scan_running: Arc::new(Mutex::new(false)),
+        scan_cancel: Arc::new(AtomicBool::new(false)),
     };
 
     if let Err(e) = downloads::cleanup_old(&state).await {
@@ -205,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/bridge/{video_id}/audio.m3u8", get(bridge::bridge_audio))
         .route("/bridge/{video_id}/segment", get(bridge::bridge_segment))
         .route("/play/{video_id}", get(bridge::play_alias))
+        .route("/direct/{video_id}", get(bridge::direct_redirect))
         .route("/download/{video_id}", get(downloads::download_endpoint))
         .route("/schedule/status", get(schedule::schedule_status_handler));
 
@@ -221,9 +233,9 @@ async fn main() -> anyhow::Result<()> {
             get(handlers::debug_sponsorblock),
         )
         .route("/strm/{video_id}", get(handlers::strm_generate))
-        // Scan endpoints
         .route("/scan", post(scan::scan_channel))
         .route("/scan/background", post(scan::scan_background))
+        .route("/scan/stop", post(scan::stop_scan))
         .route("/scan/logs", get(scan::get_scan_logs))
         .route("/schedule/trigger", post(schedule::schedule_trigger))
         .route("/channels", get(handlers::list_channels))

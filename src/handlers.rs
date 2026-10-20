@@ -13,8 +13,6 @@ use crate::images::{cleanup_image_variants, download_image};
 use crate::metadata::{build_episode_nfo, metadata_from_json};
 use crate::state::AppState;
 
-// --- Web UI & Config API ---------------------------------------------------
-
 pub async fn serve_ui() -> Html<&'static str> {
     Html(include_str!("ui.html"))
 }
@@ -130,13 +128,18 @@ pub async fn save_config_api(
             "bin_dir",
             new_config.deps.bin_dir.to_string_lossy().to_string(),
         );
+        update_toml_key(
+            &mut doc,
+            "cache",
+            "dir",
+            new_config.cache.dir.to_string_lossy().to_string(),
+        );
 
         toml_out = doc.to_string();
     }
 
     let old_config = state.config();
 
-    // 1. Write to disk and update memory IMMEDIATELY
     if let Err(e) = tokio::fs::write(path, &toml_out).await {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -148,7 +151,6 @@ pub async fn save_config_api(
 
     tracing::info!("configuration updated and applied via web UI");
 
-    // 2. Spawn the potentially hanging directory moves safely in the background
     if old_config.strm.output_dir != new_config.strm.output_dir {
         let from = old_config.strm.output_dir.clone();
         let to = new_config.strm.output_dir.clone();
@@ -182,7 +184,6 @@ pub async fn save_config_api(
         });
     }
 
-    // 3. Return success to the browser instantly
     Ok(Json(json!({
         "status": "ok",
         "message": "Configuration applied immediately.",
@@ -240,8 +241,6 @@ pub async fn add_schedule_source(
 
     Ok(true)
 }
-
-// --- Debug Handlers --------------------------------------------------------
 
 pub async fn debug_resolve(
     AxumPath(video_id): AxumPath<String>,
@@ -310,8 +309,6 @@ pub async fn debug_sponsorblock(
     })))
 }
 
-// --- STRM & Channels Handlers ----------------------------------------------
-
 pub async fn strm_generate(
     AxumPath(video_id): AxumPath<String>,
     State(state): State<AppState>,
@@ -326,11 +323,30 @@ pub async fn strm_generate(
     let title = &meta.title;
     let base_url = state.config().server.address.base_url();
     let mode = state.config().strm.mode;
-    let endpoint = match mode {
-        crate::config::StrmMode::Stream => "play",
-        crate::config::StrmMode::Download => "download",
+
+    let play_url = match mode {
+        crate::config::StrmMode::Direct => state
+            .ytdlp
+            .stream_url(
+                "best",
+                &format!("https://www.youtube.com/watch?v={video_id}"),
+            )
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("yt-dlp direct url failed: {e}"),
+                )
+            })?,
+        _ => {
+            let endpoint = match mode {
+                crate::config::StrmMode::Stream => "play",
+                crate::config::StrmMode::Download => "download",
+                _ => unreachable!(),
+            };
+            format!("{base_url}/{endpoint}/{video_id}")
+        }
     };
-    let play_url = format!("{base_url}/{endpoint}/{video_id}");
 
     let dir = &state.config().strm.output_dir;
     let safe_title = sanitize_filename(title);

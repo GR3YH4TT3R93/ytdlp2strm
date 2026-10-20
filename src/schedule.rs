@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -77,15 +78,41 @@ fn try_acquire_refresh(state: &AppState) -> Option<RefreshGuard> {
 }
 
 async fn do_refresh(state: AppState, guard: RefreshGuard) {
+    *state.scan_running.lock().unwrap() = true;
+
+    {
+        let mut logs = state.scan_logs.lock().unwrap();
+        logs.clear();
+        logs.push("Starting scheduled refresh for all sources...".to_string());
+    }
+
     let cfg = state.config();
     let sources = cfg.schedule.sources.clone();
     let delay = Duration::from_secs(cfg.schedule.per_source_delay_seconds);
 
-    tracing::info!(sources = sources.len(), "refresh starting");
+    tracing::info!(sources = sources.len(), "scheduled refresh starting");
 
     for (i, source) in sources.iter().enumerate() {
+        if state.scan_cancel.load(Ordering::Relaxed) {
+            let msg = "Scheduled refresh cancelled by user.".to_string();
+            state.scan_logs.lock().unwrap().push(msg.clone());
+            tracing::info!("{}", msg);
+            break;
+        }
+
         if i > 0 && !delay.is_zero() {
-            tokio::time::sleep(delay).await;
+            let mut chunks = delay.as_millis() / 100;
+            while chunks > 0 {
+                if state.scan_cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                chunks -= 1;
+            }
+        }
+
+        if state.scan_cancel.load(Ordering::Relaxed) {
+            break;
         }
 
         let started = Instant::now();
@@ -95,7 +122,7 @@ async fn do_refresh(state: AppState, guard: RefreshGuard) {
             source.limit,
             false,
             cfg.strm.mode,
-            None,
+            Some(&state.scan_logs),
         )
         .await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -141,13 +168,22 @@ async fn do_refresh(state: AppState, guard: RefreshGuard) {
         }
     }
 
+    *state.scan_running.lock().unwrap() = false;
+    state
+        .scan_logs
+        .lock()
+        .unwrap()
+        .push("Scheduled refresh complete.".to_string());
     drop(guard);
-    tracing::info!("refresh complete");
+    tracing::info!("scheduled refresh complete");
 }
 
 async fn run_scheduled_refresh(state: AppState) {
     match try_acquire_refresh(&state) {
-        Some(guard) => do_refresh(state, guard).await,
+        Some(guard) => {
+            state.scan_cancel.store(false, Ordering::Relaxed);
+            do_refresh(state, guard).await
+        }
         None => tracing::warn!("scheduled refresh skipped — previous run still in progress"),
     }
 }
@@ -241,6 +277,16 @@ pub async fn schedule_trigger(State(state): State<AppState>) -> (StatusCode, Jso
         );
     }
 
+    if *state.scan_running.lock().unwrap() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "triggered": false,
+                "reason": "A scan is already running",
+            })),
+        );
+    }
+
     let guard = match try_acquire_refresh(&state) {
         Some(g) => g,
         None => {
@@ -256,6 +302,8 @@ pub async fn schedule_trigger(State(state): State<AppState>) -> (StatusCode, Jso
 
     let sources = cfg.schedule.sources.len();
     let state_clone = state.clone();
+    state.scan_cancel.store(false, Ordering::Relaxed);
+
     tokio::spawn(async move {
         do_refresh(state_clone, guard).await;
     });

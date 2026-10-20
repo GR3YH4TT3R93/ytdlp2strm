@@ -6,7 +6,7 @@ address = "127.0.0.1:8080"
 
 [auth]
 username = "admin"
-password = "password"
+password = "7!Scg_A)$5&89Lf"
 
 [sponsorblock]
 enabled = true
@@ -70,6 +70,9 @@ per_source_delay_seconds = 5
 # URLs can be channels (https://www.youtube.com/@handle) or playlists.
 # Uncomment and add your own sources below.
 sources = [
-    { url = "https://www.youtube.com/@mkbhd", limit = 50 },
-    { url = "https://youtube.com/playlist?list=PLuzqoNvqVKyfYdqy9uvfzVImNTP-kpbO1", limit = 50 }, { url = "https://youtube.com/@smii7yminus", limit = 50 },
+    { url = "https://www.youtube.com/@smii7y", limit = 99999 },
+    { url = "https://www.youtube.com/@smii7yplus", limit = 99999 },
+    { url = "https://youtube.com/@smii7yminus", limit = 99999 },
+    { url = "https://youtube.com/@smii7yplays", limit = 99999 },
+    { url = "https://youtube.com/playlist?list=PLuzqoNvqVKyfYdqy9uvfzVImNTP-kpbO1", limit = 99999 },
 ]
