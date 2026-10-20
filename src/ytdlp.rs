@@ -30,14 +30,13 @@ pub struct ChannelInfo {
     pub name: String,
     pub channel_id: Option<String>,
     pub thumbnail_url: Option<String>,
+    pub banner_url: Option<String>,
     pub description: Option<String>,
     pub entries: Vec<ChannelEntry>,
 }
 
 pub struct DownloadOptions<'a> {
-    /// Output template, e.g. `<dir>/%(id)s.%(ext)s`.
     pub output_template: &'a Path,
-    /// SponsorBlock categories to physically remove. Empty = no removal.
     pub sponsorblock_categories: &'a [String],
     pub sponsorblock_api: Option<&'a str>,
 }
@@ -51,22 +50,17 @@ impl Ytdlp {
         }
     }
 
-    /// Injects the local bin directory into the subprocess PATH so that
-    /// yt-dlp automatically finds our portable ffmpeg.
     fn configure_command(&self, cmd: &mut Command) {
         if !self.bin_dir.as_os_str().is_empty() {
             let path_var = std::env::var_os("PATH").unwrap_or_default();
             let mut paths = std::env::split_paths(&path_var).collect::<Vec<_>>();
-            // Prepend our local bin dir
             paths.insert(0, self.bin_dir.clone());
-
             if let Ok(new_path) = std::env::join_paths(paths) {
                 cmd.env("PATH", new_path);
             }
         }
     }
 
-    /// Resolve a URL to yt-dlp's full JSON metadata (`yt-dlp -J`).
     pub async fn resolve(&self, url: &str) -> Result<Value> {
         let mut cmd = Command::new(&self.binary);
         self.configure_command(&mut cmd);
@@ -93,7 +87,6 @@ impl Ytdlp {
         Ok(json)
     }
 
-    /// Fetch the format-specific media playlist URL for a given format ID.
     pub async fn stream_url(&self, format_id: &str, video_url: &str) -> Result<String> {
         let mut cmd = Command::new(&self.binary);
         self.configure_command(&mut cmd);
@@ -135,10 +128,13 @@ impl Ytdlp {
         Ok(url)
     }
 
-    /// Enumerate a channel or playlist using `--flat-playlist`.
     pub async fn list_channel(&self, channel_url: &str, limit: usize) -> Result<ChannelInfo> {
         let normalized = normalize_playlist_url(channel_url);
 
+        // 1. Get high-res images via --list-thumbnails (Exact Python behavior)
+        let (thumbnail_url, banner_url) = self.get_channel_images(&normalized).await?;
+
+        // 2. Get the flat playlist JSON
         let mut cmd = Command::new(&self.binary);
         self.configure_command(&mut cmd);
 
@@ -184,11 +180,6 @@ impl Ytdlp {
             .get("channel_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-
-        let thumbnail_url = json
-            .get("thumbnails")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| best_thumbnail(arr));
 
         let description = json
             .get("description")
@@ -242,14 +233,62 @@ impl Ytdlp {
             name,
             channel_id,
             thumbnail_url,
+            banner_url,
             description,
             entries,
         })
     }
 
-    /// Download a video with yt-dlp, applying SponsorBlock removal if
-    /// categories are provided. Requires ffmpeg on PATH for the merge and
-    /// for the SB re-mux. Returns the final file path.
+    /// Runs `yt-dlp --list-thumbnails` and parses the output for uncropped images.
+    async fn get_channel_images(
+        &self,
+        channel_url: &str,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let mut cmd = Command::new(&self.binary);
+        self.configure_command(&mut cmd);
+
+        cmd.arg("--list-thumbnails")
+            .arg("--restrict-filenames")
+            .arg("--ignore-errors")
+            .arg("--no-warnings")
+            .arg("--playlist-items")
+            .arg("0")
+            .args(&self.extra_args)
+            .arg("--")
+            .arg(channel_url);
+
+        let output = tokio::time::timeout(LIST_TIMEOUT, cmd.output())
+            .await
+            .context("yt-dlp --list-thumbnails timed out")?
+            .context("failed to spawn yt-dlp")?;
+
+        if !output.status.success() {
+            return Ok((None, None));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut poster = None;
+        let mut landscape = None;
+
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.contains("avatar_uncropped") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(url) = parts.last() {
+                    poster = Some(url.to_string());
+                }
+            }
+            if line.contains("banner_uncropped") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(url) = parts.last() {
+                    landscape = Some(url.to_string());
+                }
+            }
+        }
+
+        Ok((poster, landscape))
+    }
+
     pub async fn download_video(
         &self,
         video_id: &str,
@@ -284,7 +323,6 @@ impl Ytdlp {
         cmd.args(&self.extra_args);
         cmd.arg("--").arg(&url);
 
-        // Downloads can take several minutes for long videos.
         let output = tokio::time::timeout(DOWNLOAD_TIMEOUT, cmd.output())
             .await
             .context("yt-dlp download timed out")?
@@ -317,7 +355,6 @@ impl Ytdlp {
     }
 }
 
-/// Pick the highest-resolution thumbnail from a yt-dlp `thumbnails` array.
 fn best_thumbnail(thumbnails: &[Value]) -> Option<String> {
     let mut best: Option<(&Value, (u64, i64))> = None;
     for t in thumbnails {
@@ -335,6 +372,7 @@ fn best_thumbnail(thumbnails: &[Value]) -> Option<String> {
             best = Some((t, score));
         }
     }
+
     best.and_then(|(t, _)| t.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()))
 }
 

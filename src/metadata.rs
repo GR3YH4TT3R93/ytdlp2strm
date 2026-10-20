@@ -117,6 +117,7 @@ pub fn build_tvshow_nfo(
     description: Option<&str>,
     channel_id: Option<&str>,
     thumb_filename: Option<&str>,
+    fanart_filename: Option<&str>, // <-- NEW
 ) -> String {
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n");
@@ -133,6 +134,9 @@ pub fn build_tvshow_nfo(
     }
     if let Some(thumb) = thumb_filename {
         out.push_str(&format!("  <thumb>{}</thumb>\n", xml_escape(thumb)));
+    }
+    if let Some(fanart) = fanart_filename {
+        out.push_str(&format!("  <fanart>{}</fanart>\n", xml_escape(fanart))); // <-- NEW
     }
     out.push_str("</tvshow>\n");
     out

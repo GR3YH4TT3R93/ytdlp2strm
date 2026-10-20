@@ -51,19 +51,22 @@ async fn write_channel_metadata(
     let cfg = state.config();
 
     let mut poster_filename: Option<String> = None;
+    let mut fanart_filename: Option<String> = None;
+
     if cfg.metadata.write_thumbnails {
-        let base_path = channel_dir.join("poster");
-        let existing = find_existing_image(&base_path);
-        if !force && existing.is_some() {
-            result.poster_skipped = 1;
-            if let Some(p) = existing {
+        // --- Poster (avatar_uncropped) ---
+        let poster_base = channel_dir.join("poster");
+        let existing_poster = find_existing_image(&poster_base);
+        if !force && existing_poster.is_some() {
+            result.poster_skipped += 1;
+            if let Some(p) = existing_poster {
                 poster_filename = p.file_name().map(|n| n.to_string_lossy().to_string());
             }
         } else if let Some(url) = &info.thumbnail_url {
-            emit_log(logs, "Downloading channel poster...".to_string());
-            match download_image(&state.http, url, &base_path).await {
+            emit_log(logs, "Downloading high-res channel poster...".to_string());
+            match download_image(&state.http, url, &poster_base).await {
                 Ok(final_path) => {
-                    result.poster_written = 1;
+                    result.poster_written += 1;
                     poster_filename = final_path
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string());
@@ -71,11 +74,38 @@ async fn write_channel_metadata(
                         .metrics
                         .thumbnails_written
                         .fetch_add(1, Ordering::Relaxed);
-                    cleanup_image_variants(&base_path, &final_path).await;
+                    cleanup_image_variants(&poster_base, &final_path).await;
                 }
                 Err(e) => {
                     emit_log(logs, format!("Poster download failed: {e}"));
                     tracing::warn!(channel = %info.name, error = %e, "channel poster download failed");
+                }
+            }
+        }
+
+        // --- Fanart (banner_uncropped) ---
+        let fanart_base = channel_dir.join("fanart");
+        let existing_fanart = find_existing_image(&fanart_base);
+        if !force && existing_fanart.is_some() {
+            if let Some(p) = existing_fanart {
+                fanart_filename = p.file_name().map(|n| n.to_string_lossy().to_string());
+            }
+        } else if let Some(url) = &info.banner_url {
+            emit_log(logs, "Downloading high-res channel fanart...".to_string());
+            match download_image(&state.http, url, &fanart_base).await {
+                Ok(final_path) => {
+                    fanart_filename = final_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string());
+                    state
+                        .metrics
+                        .thumbnails_written
+                        .fetch_add(1, Ordering::Relaxed);
+                    cleanup_image_variants(&fanart_base, &final_path).await;
+                }
+                Err(e) => {
+                    emit_log(logs, format!("Fanart download failed: {e}"));
+                    tracing::warn!(channel = %info.name, error = %e, "channel fanart download failed");
                 }
             }
         }
@@ -92,6 +122,7 @@ async fn write_channel_metadata(
                 info.description.as_deref(),
                 info.channel_id.as_deref(),
                 poster_filename.as_deref(),
+                fanart_filename.as_deref(), // <-- Pass it here
             );
             match tokio::fs::write(&nfo_path, nfo).await {
                 Ok(_) => {
