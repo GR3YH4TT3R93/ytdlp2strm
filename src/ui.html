@@ -747,6 +747,7 @@
                 payload.sponsorblock.enabled = document.getElementById('cfg_sb_enabled').checked;
                 payload.sponsorblock.remove = document.getElementById('cfg_sb_remove').value;
                 payload.strm.output_dir = document.getElementById('cfg_strm_output_dir').value;
+                // Ensure cron is saved even if they used the main save button
                 payload.downloads.output_dir = document.getElementById('cfg_downloads_output_dir').value;
                 payload.deps.bin_dir = document.getElementById('cfg_deps_bin_dir').value;
                 payload.cache.dir = document.getElementById('cfg_cache_dir').value;
@@ -833,11 +834,15 @@
             const outputBox = document.getElementById('scan-output');
             const scheduleBtn = document.getElementById('trigger-schedule-btn');
             const forceBtn = document.getElementById('force-schedule-btn');
+            const scanBtn = document.getElementById('scan-btn');
 
             outputBox.style.display = 'block';
             stopBtn.style.display = 'block';
             stopBtn.disabled = false;
             stopBtn.textContent = "Stop";
+
+            scanBtn.disabled = true;
+            scanBtn.textContent = "Scanning...";
 
             scheduleBtn.disabled = true;
             forceBtn.disabled = true;
@@ -857,6 +862,11 @@
                         stopBtn.style.display = 'none';
                         scheduleBtn.disabled = false;
                         forceBtn.disabled = false;
+
+                        // FIX: Restore the scan button
+                        scanBtn.disabled = false;
+                        scanBtn.textContent = "Start Scan";
+
                         showToast("Scan finished");
                         loadStatus();
                     }
@@ -869,6 +879,10 @@
                     stopBtn.style.display = 'none';
                     scheduleBtn.disabled = false;
                     forceBtn.disabled = false;
+
+                    // FIX: Restore the scan button on error too
+                    scanBtn.disabled = false;
+                    scanBtn.textContent = "Start Scan";
                 }
             }, 1000);
         }
