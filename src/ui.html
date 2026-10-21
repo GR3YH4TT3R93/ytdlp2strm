@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>ytdlp2strm</title>
     <style>
         :root {
@@ -24,7 +24,7 @@
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             background-color: var(--bg-base);
             color: var(--text-main);
-            height: 100vh;
+            min-height: 100vh;
             display: flex;
             flex-direction: column;
         }
@@ -36,6 +36,7 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-shrink: 0;
         }
 
         header h1 { font-size: 1.25rem; font-weight: 600; }
@@ -51,13 +52,16 @@
         main {
             display: flex;
             flex: 1;
-            overflow: hidden;
+            align-items: flex-start;
             padding: 1.5rem;
             gap: 1.5rem;
+            width: 100%;
+            max-width: 1600px;
+            margin: 0 auto;
         }
 
         .column-main { flex: 2; display: flex; flex-direction: column; min-width: 0; }
-        .column-side { flex: 1; min-width: 320px; display: flex; flex-direction: column; gap: 1.5rem; overflow-y: auto; }
+        .column-side { flex: 1; min-width: 320px; display: flex; flex-direction: column; gap: 1.5rem; }
 
         .panel {
             background-color: var(--bg-panel);
@@ -89,10 +93,10 @@
         }
         .tab-btn.active { background-color: var(--border); color: var(--text-main); }
 
-        .tab-content { display: none; flex: 1; flex-direction: column; overflow-y: auto; padding: 1.5rem; }
+        .tab-content { display: none; flex-direction: column; padding: 1.5rem; }
         .tab-content.active { display: flex; }
 
-        .panel-body { padding: 1rem; display: flex; flex-direction: column; flex: 1; overflow-y: auto; }
+        .panel-body { padding: 1rem; display: flex; flex-direction: column; }
 
         .form-section { margin-bottom: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 1.5rem; }
         .form-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
@@ -113,6 +117,7 @@
             border-radius: 4px;
             color: var(--text-main);
             font-size: 0.9rem;
+            -webkit-appearance: none;
         }
         input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 
@@ -121,20 +126,25 @@
         .checkbox-group label { margin-bottom: 0; cursor: pointer; }
 
         textarea {
-            flex: 1;
             width: 100%;
             background-color: var(--bg-input);
             color: var(--text-main);
-            border: none;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 1rem;
             font-family: "Fira Code", "Cascadia Code", Consolas, monospace;
             font-size: 0.9rem;
             line-height: 1.5;
-            resize: none;
+            resize: vertical;
             outline: none;
             white-space: pre;
         }
 
-        .panel-footer { padding: 1rem 1.5rem; border-top: 1px solid var(--border); }
+        #config-editor {
+            min-height: 400px;
+        }
+
+        .panel-footer { padding: 1rem 1.5rem; border-top: 1px solid var(--border); background-color: var(--bg-panel); }
 
         button.primary {
             width: 100%;
@@ -172,6 +182,48 @@
         }
         button.danger:hover { background-color: #dc2626; }
 
+        /* --- DYNAMIC ARG LIST STYLES --- */
+        .arg-row {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .arg-row input {
+            flex: 1;
+            font-family: monospace;
+        }
+        .arg-row button {
+            width: auto;
+            padding: 0 0.8rem;
+            background-color: transparent;
+            border: 1px solid var(--error);
+            color: var(--error);
+            border-radius: 4px;
+            font-size: 1.1rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .arg-row button:hover {
+            background-color: var(--error);
+            color: white;
+        }
+        .add-arg-btn {
+            width: 100%;
+            background: var(--bg-input);
+            border: 1px dashed var(--border);
+            color: var(--text-muted);
+            padding: 0.5rem;
+            cursor: pointer;
+            border-radius: 4px;
+            text-align: center;
+            transition: all 0.2s;
+            font-size: 0.9rem;
+        }
+        .add-arg-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
         .btn-row { display: flex; gap: 0.5rem; margin-top: 1rem; }
         .btn-row button { margin-top: 0; }
 
@@ -181,8 +233,8 @@
             border-radius: 6px;
             font-size: 0.85rem;
             line-height: 1.5;
-            overflow-y: auto;
             max-height: 400px;
+            overflow-y: auto;
         }
         .status-box strong { color: var(--text-main); }
         .status-box .muted { color: var(--text-muted); }
@@ -217,10 +269,67 @@
         .toast.success { background-color: var(--success); }
         .toast.error { background-color: var(--error); }
 
+        .scheduler-settings {
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            padding: 1rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+        }
+
         @media (max-width: 900px) {
-            main { flex-direction: column; overflow-y: auto; padding: 1rem; }
-            .column-main { min-height: 50vh; }
-            .form-grid { grid-template-columns: 1fr; }
+            main {
+                flex-direction: column;
+                padding: 1rem;
+            }
+            .column-main, .column-side {
+                flex: none;
+                width: 100%;
+                min-width: 0;
+            }
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+            #config-editor {
+                min-height: 300px;
+            }
+        }
+
+        @media (max-width: 600px) {
+            header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 1rem;
+                padding: 1.5rem 1rem;
+            }
+            header nav {
+                display: flex;
+                gap: 1.5rem;
+                width: 100%;
+            }
+            header nav a {
+                margin-left: 0;
+            }
+            .panel-header {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 1rem;
+                padding: 1rem;
+            }
+            .tabs {
+                width: 100%;
+            }
+            .tab-btn {
+                flex: 1;
+                text-align: center;
+            }
+            .toast {
+                left: 1rem;
+                right: 1rem;
+                bottom: 1rem;
+                text-align: center;
+                padding: 1rem;
+            }
         }
     </style>
 </head>
@@ -239,13 +348,13 @@
             <div class="panel-header">
                 <h2>Configuration</h2>
                 <div class="tabs">
-                    <button class="tab-btn active" onclick="switchTab('form')">Settings Form</button>
-                    <button class="tab-btn" onclick="switchTab('toml')">Advanced (TOML)</button>
+                    <button class="tab-btn active" data-tab="form" onclick="switchTab('form')">Settings Form</button>
+                    <button class="tab-btn" data-tab="toml" onclick="switchTab('toml')">Advanced (TOML)</button>
                 </div>
             </div>
 
             <div id="tab-form" class="tab-content active">
-                <form id="settings-form">
+                <form id="settings-form" onsubmit="event.preventDefault(); saveConfig();" autocomplete="off">
                     <div class="form-section">
                         <h3>Server & Security</h3>
                         <div class="form-group">
@@ -257,12 +366,12 @@
                             <div class="form-group">
                                 <label>Username</label>
                                 <small>Leave blank to disable authentication.</small>
-                                <input type="text" id="cfg_auth_username">
+                                <input type="text" id="cfg_auth_username" name="auth_username" autocomplete="username">
                             </div>
                             <div class="form-group">
                                 <label>Password</label>
-                                <small>Required if a username is set.</small>
-                                <input type="password" id="cfg_auth_password">
+                                <small>Leave blank to keep current. Required if a username is set.</small>
+                                <input type="password" id="cfg_auth_password" name="auth_password" autocomplete="new-password" placeholder="••••••••">
                             </div>
                         </div>
                     </div>
@@ -324,6 +433,16 @@
                             <label for="cfg_downloads_pre_download">Pre-download videos in background (Download Mode only)</label>
                         </div>
                     </div>
+
+                    <div class="form-section">
+                        <h3>yt-dlp Advanced Options</h3>
+                        <div class="form-group">
+                            <label>Extra Arguments</label>
+                            <small>One argument per line. Values with spaces should be quoted.</small>
+                            <div id="ytdlp-args-list"></div>
+                            <button type="button" class="add-arg-btn" onclick="addArgRow()">+ Add Argument</button>
+                        </div>
+                    </div>
                 </form>
             </div>
 
@@ -381,6 +500,25 @@
             <div class="panel">
                 <div class="panel-header"><h2>Schedule Status</h2></div>
                 <div class="panel-body">
+
+                    <div class="scheduler-settings">
+                        <label>Run Every</label>
+                        <div style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
+                            <input type="number" id="cfg_sched_val" min="1" value="1" style="width: 80px;">
+                            <select id="cfg_sched_unit" style="flex: 1;">
+                                <option value="minutes">Minutes</option>
+                                <option value="hours">Hours</option>
+                                <option value="days">Days</option>
+                                <option value="months">Months</option>
+                            </select>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem; align-items: center;">
+                            <input type="text" id="cfg_sched_cron_preview" readonly style="background-color: var(--border); opacity: 0.8; font-family: monospace; font-size: 0.8rem; padding: 0.4rem;">
+                            <button class="primary" style="width: auto; padding: 0.4rem 0.8rem; font-size: 0.8rem;" onclick="saveSchedule(event)">Save</button>
+                        </div>
+                        <small style="margin-top: 0.5rem; margin-bottom: 0;">Sets the auto-scan frequency.</small>
+                    </div>
+
                     <div id="schedule-status" class="status-box">Loading...</div>
 
                     <div style="display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem;">
@@ -397,30 +535,127 @@
     <script>
         let fullConfig = null;
         let scanPollInterval = null;
+        let toastTimeout = null;
+        let statusPollTimeout = null;
         const toast = document.getElementById('toast');
 
+        async function fetchWithTimeout(resource, options = {}) {
+            const { timeout = 8000 } = options;
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), timeout);
+            try {
+                const response = await fetch(resource, {
+                    ...options,
+                    signal: controller.signal
+                });
+                clearTimeout(id);
+                return response;
+            } catch (error) {
+                clearTimeout(id);
+                throw error;
+            }
+        }
+
         function showToast(msg, isError = false) {
+            if (toastTimeout) clearTimeout(toastTimeout);
             toast.textContent = msg;
             toast.className = `toast show ${isError ? 'error' : 'success'}`;
-            setTimeout(() => { toast.classList.remove('show'); }, 4000);
+            toastTimeout = setTimeout(() => { toast.classList.remove('show'); }, 4000);
         }
 
         function switchTab(tab) {
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(b => {
+                b.classList.toggle('active', b.dataset.tab === tab);
+            });
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            document.getElementById(`tab-${tab}`).classList.add('active');
+        }
 
-            if (tab === 'form') {
-                document.querySelectorAll('.tab-btn')[0].classList.add('active');
-                document.getElementById('tab-form').classList.add('active');
-            } else {
-                document.querySelectorAll('.tab-btn')[1].classList.add('active');
-                document.getElementById('tab-toml').classList.add('active');
+        // --- SMART ARGUMENT PARSING ---
+        // Converts string like: --cookies "/my path/cookies.txt" -> ["--cookies", "/my path/cookies.txt"]
+        function parseArgsString(str) {
+            const regex = /[^\s"']+|"[^"]*"|'[^']*'/g;
+            const matches = str.match(regex) || [];
+            return matches.map(s => s.replace(/^["']|["']$/g, ''));
+        }
+
+        // Converts array back to single lines for the UI
+        // ["--cookies", "/path", "--js-runtimes", "node"] -> ["--cookies /path", "--js-runtimes node"]
+        function arrayToLines(args) {
+            const lines = [];
+            let current = [];
+            for (const arg of args) {
+                if (arg.startsWith('-') && current.length > 0) {
+                    lines.push(current.join(' '));
+                    current = [arg];
+                } else {
+                    current.push(arg);
+                }
             }
+            if (current.length > 0) lines.push(current.join(' '));
+            return lines;
+        }
+
+        function addArgRow(value = "") {
+            const container = document.getElementById('ytdlp-args-list');
+            const row = document.createElement('div');
+            row.className = 'arg-row';
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'cfg-arg-input';
+            input.value = value;
+            input.placeholder = 'e.g., --cookies "/path/to/cookies.txt"';
+
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.innerHTML = '&times;';
+            btn.title = 'Remove argument';
+            btn.onclick = () => row.remove();
+
+            row.appendChild(input);
+            row.appendChild(btn);
+            container.appendChild(row);
+        }
+
+        function updateCronPreview() {
+            const val = document.getElementById('cfg_sched_val').value || 1;
+            const unit = document.getElementById('cfg_sched_unit').value;
+            let cron = "0 * * * *";
+
+            if (unit === "minutes") cron = `*/${val} * * * *`;
+            else if (unit === "hours") cron = `0 */${val} * * *`;
+            else if (unit === "days") cron = `0 0 */${val} * *`;
+            else if (unit === "months") cron = `0 0 1 */${val} *`;
+
+            document.getElementById('cfg_sched_cron_preview').value = cron;
+        }
+
+        document.getElementById('cfg_sched_val').addEventListener('input', updateCronPreview);
+        document.getElementById('cfg_sched_unit').addEventListener('change', updateCronPreview);
+
+        function parseCronToUi(cron) {
+            let val = 1;
+            let unit = "hours";
+
+            const parts = cron.trim().split(/\s+/);
+            if (parts.length === 5) {
+                const [min, hour, dom, month, dow] = parts;
+                if (min.startsWith("*/") && hour === "*") { val = parseInt(min.slice(2)); unit = "minutes"; }
+                else if (min === "0" && hour.startsWith("*/")) { val = parseInt(hour.slice(2)); unit = "hours"; }
+                else if (min === "0" && hour === "0" && dom.startsWith("*/")) { val = parseInt(dom.slice(2)); unit = "days"; }
+                else if (min === "0" && hour === "0" && dom === "1" && month.startsWith("*/")) { val = parseInt(month.slice(2)); unit = "months"; }
+                else if (min === "*" && hour === "*" && dom === "*" && month === "*") { val = 1; unit = "minutes"; }
+                else if (min === "0" && hour === "*" && dom === "*") { val = 1; unit = "hours"; }
+                else if (min === "0" && hour === "0" && dom === "*") { val = 1; unit = "days"; }
+                else if (min === "0" && hour === "0" && dom === "1") { val = 1; unit = "months"; }
+            }
+            return { val, unit };
         }
 
         async function loadConfig() {
             try {
-                const res = await fetch('/api/config');
+                const res = await fetchWithTimeout('/api/config');
                 if (!res.ok) {
                     const text = await res.text();
                     throw new Error(text || res.statusText);
@@ -428,22 +663,49 @@
                 const data = await res.json();
 
                 fullConfig = data.json;
+                if (!fullConfig.auth) fullConfig.auth = { username: '', password: '' };
+                if (!fullConfig.schedule) fullConfig.schedule = { cron: "0 * * * *" };
+                if (!fullConfig.youtube) fullConfig.youtube = { extra_args: [] };
+
                 document.getElementById('config-editor').value = data.toml;
 
-                document.getElementById('cfg_server_address').value = fullConfig.server.address;
-                document.getElementById('cfg_auth_username').value = fullConfig.auth.username;
-                document.getElementById('cfg_auth_password').value = fullConfig.auth.password;
+                document.getElementById('cfg_server_address').value = fullConfig.server.address || '';
+                document.getElementById('cfg_auth_username').value = fullConfig.auth.username || '';
+                document.getElementById('cfg_auth_password').value = '';
+
+                // Load Extra Args into grouped lines
+                const argsContainer = document.getElementById('ytdlp-args-list');
+                argsContainer.innerHTML = '';
+                const rawArgs = fullConfig.youtube.extra_args || [];
+                const groupedLines = arrayToLines(rawArgs);
+
+                if (groupedLines.length === 0) {
+                    addArgRow();
+                } else {
+                    groupedLines.forEach(line => addArgRow(line));
+                }
+
+                // Load Cron
+                const cronStr = fullConfig.schedule.cron || fullConfig.schedule.refresh_cron || "0 * * * *";
+                const parsedCron = parseCronToUi(cronStr);
+                document.getElementById('cfg_sched_val').value = parsedCron.val;
+                document.getElementById('cfg_sched_unit').value = parsedCron.unit;
+                updateCronPreview();
+
                 document.getElementById('cfg_sb_enabled').checked = fullConfig.sponsorblock.enabled;
-                document.getElementById('cfg_sb_remove').value = fullConfig.sponsorblock.remove;
-                document.getElementById('cfg_strm_output_dir').value = fullConfig.strm.output_dir;
-                document.getElementById('cfg_downloads_output_dir').value = fullConfig.downloads.output_dir;
-                document.getElementById('cfg_deps_bin_dir').value = fullConfig.deps.bin_dir;
-                document.getElementById('cfg_cache_dir').value = fullConfig.cache.dir;
+                document.getElementById('cfg_sb_remove').value = fullConfig.sponsorblock.remove || '';
+                document.getElementById('cfg_strm_output_dir').value = fullConfig.strm.output_dir || '';
+                document.getElementById('cfg_downloads_output_dir').value = fullConfig.downloads.output_dir || '';
+                document.getElementById('cfg_deps_bin_dir').value = fullConfig.deps.bin_dir || '';
+                document.getElementById('cfg_cache_dir').value = fullConfig.cache.dir || '';
                 document.getElementById('cfg_strm_mode').value = fullConfig.strm.mode;
                 document.getElementById('cfg_downloads_pre_download').checked = fullConfig.downloads.pre_download;
             } catch (e) {
-                showToast("Error loading config: " + e.message, true);
-                console.error("loadConfig error:", e);
+                if (e.name === 'AbortError') {
+                    showToast("Timeout loading config. Server may be offline.", true);
+                } else {
+                    showToast("Error loading config: " + e.message, true);
+                }
             }
         }
 
@@ -456,24 +718,46 @@
             let payload = {};
 
             if (isFormActive) {
-                fullConfig.server.address = document.getElementById('cfg_server_address').value;
-                fullConfig.auth.username = document.getElementById('cfg_auth_username').value;
-                fullConfig.auth.password = document.getElementById('cfg_auth_password').value;
-                fullConfig.sponsorblock.enabled = document.getElementById('cfg_sb_enabled').checked;
-                fullConfig.sponsorblock.remove = document.getElementById('cfg_sb_remove').value;
-                fullConfig.strm.output_dir = document.getElementById('cfg_strm_output_dir').value;
-                fullConfig.downloads.output_dir = document.getElementById('cfg_downloads_output_dir').value;
-                fullConfig.deps.bin_dir = document.getElementById('cfg_deps_bin_dir').value;
-                fullConfig.cache.dir = document.getElementById('cfg_cache_dir').value;
-                fullConfig.strm.mode = document.getElementById('cfg_strm_mode').value;
-                fullConfig.downloads.pre_download = document.getElementById('cfg_downloads_pre_download').checked;
-                payload = fullConfig;
+                payload = JSON.parse(JSON.stringify(fullConfig));
+
+                payload.server.address = document.getElementById('cfg_server_address').value;
+                payload.auth.username = document.getElementById('cfg_auth_username').value;
+
+                const newPassword = document.getElementById('cfg_auth_password').value;
+                if (newPassword) {
+                    payload.auth.password = newPassword;
+                }
+
+                // Read and parse dynamic argument rows
+                const argInputs = document.querySelectorAll('.cfg-arg-input');
+                let finalArgs = [];
+                argInputs.forEach(input => {
+                    const val = input.value.trim();
+                    if (val) {
+                        finalArgs = finalArgs.concat(parseArgsString(val));
+                    }
+                });
+                payload.youtube.extra_args = finalArgs;
+
+                // Ensure cron is saved even if they used the main save button
+                const newCron = document.getElementById('cfg_sched_cron_preview').value;
+                payload.schedule.cron = newCron;
+                payload.schedule.refresh_cron = newCron;
+
+                payload.sponsorblock.enabled = document.getElementById('cfg_sb_enabled').checked;
+                payload.sponsorblock.remove = document.getElementById('cfg_sb_remove').value;
+                payload.strm.output_dir = document.getElementById('cfg_strm_output_dir').value;
+                payload.downloads.output_dir = document.getElementById('cfg_downloads_output_dir').value;
+                payload.deps.bin_dir = document.getElementById('cfg_deps_bin_dir').value;
+                payload.cache.dir = document.getElementById('cfg_cache_dir').value;
+                payload.strm.mode = document.getElementById('cfg_strm_mode').value;
+                payload.downloads.pre_download = document.getElementById('cfg_downloads_pre_download').checked;
             } else {
                 payload = { toml: document.getElementById('config-editor').value };
             }
 
             try {
-                const res = await fetch('/api/config', {
+                const res = await fetchWithTimeout('/api/config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
@@ -489,11 +773,58 @@
                 if (data.toml) {
                     document.getElementById('config-editor').value = data.toml;
                 }
+                loadConfig();
             } catch (e) {
-                showToast("Failed to save: " + e.message, true);
+                if (e.name === 'AbortError') {
+                    showToast("Save timed out. Check server connection.", true);
+                } else {
+                    showToast("Failed to save: " + e.message, true);
+                }
             } finally {
                 btn.disabled = false;
                 btn.textContent = "Save & Apply Configuration";
+            }
+        }
+
+        async function saveSchedule(e) {
+            const btn = e.target;
+            btn.disabled = true;
+            btn.textContent = "Saving...";
+
+            const newCron = document.getElementById('cfg_sched_cron_preview').value;
+            if (!fullConfig) fullConfig = {};
+            if (!fullConfig.schedule) fullConfig.schedule = {};
+
+            fullConfig.schedule.cron = newCron;
+            fullConfig.schedule.refresh_cron = newCron;
+
+            try {
+                const res = await fetchWithTimeout('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(fullConfig)
+                });
+
+                const text = await res.text();
+                let data = {};
+                try { data = JSON.parse(text); } catch (e) { data = { error: text }; }
+
+                if (!res.ok) throw new Error(data.error || "Save failed");
+
+                showToast("Schedule updated!");
+                if (data.toml) {
+                    document.getElementById('config-editor').value = data.toml;
+                }
+                loadStatus();
+            } catch (err) {
+                if (err.name === 'AbortError') {
+                    showToast("Save timed out. Check server connection.", true);
+                } else {
+                    showToast("Failed to save schedule: " + err.message, true);
+                }
+            } finally {
+                btn.disabled = false;
+                btn.textContent = "Save";
             }
         }
 
@@ -514,7 +845,7 @@
             if (scanPollInterval) clearInterval(scanPollInterval);
             scanPollInterval = setInterval(async () => {
                 try {
-                    const logRes = await fetch('/scan/logs');
+                    const logRes = await fetchWithTimeout('/scan/logs', { timeout: 5000 });
                     const logData = await logRes.json();
 
                     outputBox.textContent = logData.logs.join('\n');
@@ -530,14 +861,16 @@
                         loadStatus();
                     }
                 } catch (e) {
-                    outputBox.textContent += `\n[Connection Error: ${e.message}]`;
+                    if (e.name !== 'AbortError') {
+                        outputBox.textContent += `\n[Connection Error: ${e.message}]`;
+                    }
                     clearInterval(scanPollInterval);
                     scanPollInterval = null;
                     stopBtn.style.display = 'none';
                     scheduleBtn.disabled = false;
                     forceBtn.disabled = false;
                 }
-            }, 500);
+            }, 1000);
         }
 
         async function triggerScan() {
@@ -556,7 +889,7 @@
             if (mode) payload.mode = mode;
 
             try {
-                const res = await fetch('/scan/background', {
+                const res = await fetchWithTimeout('/scan/background', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
@@ -586,7 +919,7 @@
             stopBtn.textContent = "Stopping...";
 
             try {
-                await fetch('/scan/stop', { method: 'POST' });
+                await fetchWithTimeout('/scan/stop', { method: 'POST' });
                 showToast("Stop signal sent. Finishing current video...");
             } catch (e) {
                 showToast("Failed to send stop signal", true);
@@ -604,7 +937,7 @@
             btn.textContent = "Starting...";
 
             try {
-                const res = await fetch(`/schedule/trigger?force=${force}`, { method: 'POST' });
+                const res = await fetchWithTimeout(`/schedule/trigger?force=${force}`, { method: 'POST' });
                 if (res.status === 202) {
                     showToast(force ? "Forced rescan started." : "Scheduled scans started.");
                     startLogPolling();
@@ -629,8 +962,10 @@
         }
 
         async function loadStatus() {
+            if (statusPollTimeout) clearTimeout(statusPollTimeout);
+
             try {
-                const res = await fetch('/schedule/status');
+                const res = await fetchWithTimeout('/schedule/status');
                 const data = await res.json();
                 const container = document.getElementById('schedule-status');
 
@@ -657,7 +992,11 @@
 
                         if (s.last_run) {
                             const d = new Date(s.last_run);
-                            html += `Last run: ${d.toLocaleString()} | `;
+                            if (!isNaN(d.getTime())) {
+                                html += `Last run: ${d.toLocaleString()} | `;
+                            } else {
+                                html += `Last run: ${s.last_run} | `;
+                            }
                             html += `Results: ${s.last_total} total, ${s.last_written} written, ${s.last_skipped} skipped`;
                         } else {
                             html += `<span class="muted">Not run yet</span>`;
@@ -673,13 +1012,24 @@
 
                 container.innerHTML = html;
             } catch (e) {
-                document.getElementById('schedule-status').textContent = "Error loading status.";
+                if (e.name !== 'AbortError') {
+                    document.getElementById('schedule-status').textContent = "Error loading status.";
+                }
+            } finally {
+                if (document.visibilityState === 'visible') {
+                    statusPollTimeout = setTimeout(loadStatus, 10000);
+                }
             }
         }
 
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                loadStatus();
+            }
+        });
+
         loadConfig();
         loadStatus();
-        setInterval(loadStatus, 10000);
     </script>
 </body>
 </html>
