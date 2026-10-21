@@ -22,7 +22,7 @@ enum StreamKind {
 }
 
 impl StreamKind {
-    fn best<'a>(&self, json: &'a Value) -> Option<&'a Value> {
+    fn best<'a>(&self, json: &'a Value, is_twitch: bool) -> Option<&'a Value> {
         let formats = json.get("formats")?.as_array()?;
 
         let mut candidates: Vec<&Value> = formats
@@ -33,7 +33,8 @@ impl StreamKind {
                         && f.get("vcodec")
                             .and_then(|v| v.as_str())
                             .is_some_and(|v| v != "none")
-                    // FIX: Removed the requirement for acodec == "none" so it accepts Twitch's muxed streams
+                        // Allow muxed streams for Twitch, but force video-only for YouTube
+                        && (is_twitch || f.get("acodec").and_then(|v| v.as_str()).is_none_or(|a| a == "none"))
                 }
                 StreamKind::Audio => {
                     is_hls(f) && f.get("vcodec").and_then(|v| v.as_str()) == Some("none")
@@ -48,18 +49,17 @@ impl StreamKind {
                 let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("");
 
                 let is_video_only = (acodec == "none") as u64;
+                // Force H.264 over VP9 for maximum Android compatibility
                 let is_h264 = vcodec.starts_with("avc") as u64;
                 (is_video_only, is_h264, h)
             }
             StreamKind::Audio => {
-                let abr = f.get("abr").and_then(|v| v.as_u64()).unwrap_or(0);
-                let is_opus =
-                    f.get("format_id")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|id| id == "251" || id == "233") as u64;
-
-                // FIX: Added a third `0` to match the video tuple size
-                (is_opus, abr, 0)
+                let fid = f.get("format_id").and_then(|v| v.as_str()).unwrap_or("");
+                let abr = f.get("abr").and_then(|v| v.as_f64()).unwrap_or(0.0) as u64;
+                // FIX: Explicitly prioritize AAC (140, 234) over Opus (251, 233)
+                // so it works in MPEG-TS containers on Android.
+                let is_aac = (fid == "140" || fid == "234") as u64;
+                (is_aac, abr, 0)
             }
         });
 
@@ -126,11 +126,12 @@ async fn build_filtered_playlist(
         .get_or_resolve(&state.ytdlp, video_id, None)
         .await?;
 
+    let is_twitch = video_id.starts_with('v');
     let format_id: String = if let Some(fid) = forced_format_id {
         fid.to_string()
     } else {
         let fmt = kind
-            .best(&json)
+            .best(&json, is_twitch)
             .ok_or_else(|| anyhow!("no HLS {kind:?} format"))?;
         fmt.get("format_id")
             .and_then(|v| v.as_str())
@@ -189,33 +190,17 @@ async fn build_master_body(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
 
-    let video_fmt = StreamKind::Video
-        .best(&json)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "no HLS video format".to_string()))?;
+    let is_twitch = video_id.starts_with('v');
 
-    let audio_fmt = StreamKind::Audio
-        .best(&json)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "no HLS audio format".to_string()))?;
+    let video_fmt = StreamKind::Video
+        .best(&json, is_twitch)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "no HLS video format".to_string()))?;
 
     let video_format_id = video_fmt
         .get("format_id")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "video format missing id".to_string(),
-            )
-        })?;
-    let audio_format_id = audio_fmt
-        .get("format_id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "audio format missing id".to_string(),
-            )
-        })?;
-
+        .unwrap_or("")
+        .to_string();
     let vcodec = video_fmt
         .get("vcodec")
         .and_then(|v| v.as_str())
@@ -226,15 +211,11 @@ async fn build_master_body(
         .unwrap_or(0);
     let width = video_fmt.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
 
-    let acodec = if audio_format_id == "251" || audio_format_id == "233" {
-        "opus"
-    } else {
-        audio_fmt
-            .get("acodec")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty() && *s != "none")
-            .unwrap_or("mp4a.40.2")
-    };
+    let acodec = video_fmt
+        .get("acodec")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
+    let is_muxed = acodec != "none";
 
     let bandwidth = video_fmt
         .get("tbr")
@@ -242,29 +223,56 @@ async fn build_master_body(
         .map(|tbr| (tbr * 1000.0) as u64)
         .filter(|b| *b > 0)
         .unwrap_or(5_000_000);
-
     let resolution = if width > 0 && height > 0 {
         format!(",RESOLUTION={width}x{height}")
     } else {
         String::new()
     };
 
-    let mut codec_parts = Vec::new();
-    if !vcodec.is_empty() {
-        codec_parts.push(vcodec);
-    }
-    codec_parts.push(acodec);
-    let codecs = format!(",CODECS=\"{}\"", codec_parts.join(","));
-
     let base = format!("/bridge/{video_id}");
 
-    let body = format!(
-        "#EXTM3U\n\
-         #EXT-X-VERSION:3\n\
-         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"main\",DEFAULT=YES,AUTOSELECT=YES,URI=\"{base}/audio.m3u8?fmt={audio_format_id}\"\n\
-         #EXT-X-STREAM-INF:BANDWIDTH={bandwidth}{resolution}{codecs},AUDIO=\"aud\"\n\
-         {base}/video.m3u8?fmt={video_format_id}\n"
-    );
+    let body = if is_muxed {
+        // Twitch (muxed video + audio)
+        let codecs = format!(",CODECS=\"{},{}\"", vcodec, acodec);
+        format!(
+            "#EXTM3U\n\
+             #EXT-X-VERSION:3\n\
+             #EXT-X-STREAM-INF:BANDWIDTH={bandwidth}{resolution}{codecs}\n\
+             {base}/video.m3u8?fmt={video_format_id}\n"
+        )
+    } else {
+        // YouTube (separate audio/video streams)
+        let audio_fmt = StreamKind::Audio
+            .best(&json, is_twitch)
+            .ok_or_else(|| (StatusCode::NOT_FOUND, "no HLS audio format".to_string()))?;
+        let audio_format_id = audio_fmt
+            .get("format_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // FIX: Map the codec correctly based on the selected ID
+        let acodec_out = if audio_format_id == "251" || audio_format_id == "233" {
+            "opus"
+        } else {
+            "mp4a.40.2"
+        };
+
+        let mut codec_parts = Vec::new();
+        if !vcodec.is_empty() {
+            codec_parts.push(vcodec);
+        }
+        codec_parts.push(acodec_out);
+        let codecs = format!(",CODECS=\"{}\"", codec_parts.join(","));
+
+        format!(
+            "#EXTM3U\n\
+             #EXT-X-VERSION:3\n\
+             #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"main\",DEFAULT=YES,AUTOSELECT=YES,URI=\"{base}/audio.m3u8?fmt={audio_format_id}\"\n\
+             #EXT-X-STREAM-INF:BANDWIDTH={bandwidth}{resolution}{codecs},AUDIO=\"aud\"\n\
+             {base}/video.m3u8?fmt={video_format_id}\n"
+        )
+    };
 
     state.playlist_cache.set(cache_key, body.clone());
     write_cache_file(&state.cache_dir, &disk_filename, &body).await;
@@ -291,15 +299,7 @@ pub async fn play_alias(
     AxumPath(video_id): AxumPath<String>,
     State(state): State<AppState>,
 ) -> Result<Response, (StatusCode, String)> {
-    let body = build_master_body(&state, &video_id).await?;
-    state
-        .metrics
-        .playlists_served
-        .fetch_add(1, Ordering::Relaxed);
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-        .body(Body::from(body))
-        .unwrap())
+    bridge_master(AxumPath(video_id), State(state)).await
 }
 
 pub async fn bridge_video(
@@ -347,14 +347,13 @@ pub async fn bridge_segment(
     let url = params
         .get("u")
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing u parameter".to_string()))?;
-
     let mut req = state.http.get(url);
 
     if url.contains("youtube.com") || url.contains("googlevideo.com") {
         req = req
             .header(reqwest::header::REFERER, "https://www.youtube.com/")
             .header(reqwest::header::ORIGIN, "https://www.youtube.com");
-    } else if url.contains("twitch.tv") {
+    } else if url.contains("twitch.tv") || url.contains("cloudfront.net") {
         req = req
             .header(reqwest::header::REFERER, "https://www.twitch.tv/")
             .header(reqwest::header::ORIGIN, "https://www.twitch.tv");
@@ -398,7 +397,6 @@ pub async fn bridge_segment(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-
     let mut builder = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, content_type);

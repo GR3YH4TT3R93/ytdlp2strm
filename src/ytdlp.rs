@@ -85,7 +85,9 @@ impl Ytdlp {
         self.configure_command(&mut cmd);
 
         cmd.arg("-J").arg("--no-warnings").arg("--no-playlist");
-        add_rate_limit_args(&mut cmd);
+
+        // NO rate limits for playback metadata resolution (fast)
+
         cmd.args(&self.extra_args).arg("--").arg(url);
 
         let output = tokio::time::timeout(RESOLVE_TIMEOUT, cmd.output())
@@ -119,10 +121,11 @@ impl Ytdlp {
             .arg("-f")
             .arg(format_id)
             .arg("--no-warnings")
-            .arg("--no-playlist")
-            .args(&self.extra_args)
-            .arg("--")
-            .arg(&target_url);
+            .arg("--no-playlist");
+
+        // NO rate limits for playback stream URL (fast)
+
+        cmd.args(&self.extra_args).arg("--").arg(&target_url);
 
         let output = tokio::time::timeout(RESOLVE_TIMEOUT, cmd.output())
             .await
@@ -188,14 +191,12 @@ impl Ytdlp {
         }
     }
 
-    /// Uses Twitch's GraphQL API to fetch the highest quality avatar and banner.
     async fn fetch_twitch_images(
         &self,
         channel_name: &str,
     ) -> Result<(Option<String>, Option<String>)> {
         let client = reqwest::Client::new();
 
-        // This is the exact query and hash the Python ytdlp2STRM script uses.
         let payload = json!([{
             "operationName": "ChannelShell",
             "variables": { "login": channel_name },
@@ -222,13 +223,10 @@ impl Ytdlp {
                 let mut avatar = user["profileImageURL"].as_str().map(|s| s.to_string());
                 let mut banner = user["bannerImageURL"].as_str().map(|s| s.to_string());
 
-                // Twitch avatars default to 70x70 or 300x300.
-                // We string-replace to 600x600 to get the absolute maximum resolution.
                 if let Some(a) = &avatar {
                     avatar = Some(a.replace("70x70", "600x600").replace("300x300", "600x600"));
                 }
 
-                // If there's no banner, don't use the generic fallback URL Twitch provides
                 if let Some(b) = &banner {
                     if b.contains("no_banner") {
                         banner = None;
@@ -405,7 +403,6 @@ impl Ytdlp {
                                     .map(|s| s.to_string())
                             });
 
-                        // UPGRADE VOD THUMBNAIL: Twitch returns 320x180 by default, replace with 1280x720
                         if let Some(t) = &thumbnail_url {
                             if t.contains("thumb0-320x180.jpg") {
                                 thumbnail_url = Some(t.replace("320x180", "1280x720"));
