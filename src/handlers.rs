@@ -315,7 +315,7 @@ pub async fn strm_generate(
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let json = state
         .resolve_cache
-        .get_or_resolve(&state.ytdlp, &video_id)
+        .get_or_resolve(&state.ytdlp, &video_id, None)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
 
@@ -373,23 +373,24 @@ pub async fn strm_generate(
     let mut thumb_filename: Option<String> = None;
     let mut thumb_path: Option<std::path::PathBuf> = None;
     if state.config().metadata.write_thumbnails
-        && let Some(url) = json.get("thumbnail").and_then(|v| v.as_str()) {
-            let base_path = dir.join(format!("{safe_title}-thumb"));
-            match download_image(&state.http, url, &base_path).await {
-                Ok(p) => {
-                    state
-                        .metrics
-                        .thumbnails_written
-                        .fetch_add(1, Ordering::Relaxed);
-                    thumb_filename = p.file_name().map(|n| n.to_string_lossy().to_string());
-                    cleanup_image_variants(&base_path, &p).await;
-                    thumb_path = Some(p);
-                }
-                Err(e) => {
-                    tracing::warn!(video_id = %video_id, error = %e, "thumbnail download failed");
-                }
+        && let Some(url) = json.get("thumbnail").and_then(|v| v.as_str())
+    {
+        let base_path = dir.join(format!("{safe_title}-thumb"));
+        match download_image(&state.http, url, &base_path).await {
+            Ok(p) => {
+                state
+                    .metrics
+                    .thumbnails_written
+                    .fetch_add(1, Ordering::Relaxed);
+                thumb_filename = p.file_name().map(|n| n.to_string_lossy().to_string());
+                cleanup_image_variants(&base_path, &p).await;
+                thumb_path = Some(p);
+            }
+            Err(e) => {
+                tracing::warn!(video_id = %video_id, error = %e, "thumbnail download failed");
             }
         }
+    }
 
     let mut nfo_path: Option<std::path::PathBuf> = None;
     if state.config().metadata.write_nfo {

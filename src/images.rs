@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use std::path::{Path, PathBuf};
 
-pub const IMAGE_EXTS: &[&str] = &["webp", "jpg", "jpeg", "png", "gif"];
+pub const IMAGE_EXTS: &[&str] = &["webp", "jpg", "jpeg", "png", "gif", "avif"];
 
 /// Detect the actual image format from magic bytes.
 pub fn sniff_image_ext(bytes: &[u8]) -> &'static str {
@@ -19,6 +19,10 @@ pub fn sniff_image_ext(bytes: &[u8]) -> &'static str {
     }
     if &bytes[0..3] == b"GIF" {
         return "gif";
+    }
+    // AVIF detection (ftypavif at offset 4)
+    if &bytes[4..12] == b"ftypavif" {
+        return "avif";
     }
     "bin"
 }
@@ -54,28 +58,40 @@ pub async fn download_image(
     url: &str,
     base_path: &Path,
 ) -> anyhow::Result<PathBuf> {
+    // Fix protocol-relative URLs from Twitch
+    let fixed_url = if url.starts_with("//") {
+        format!("https:{}", url)
+    } else {
+        url.to_string()
+    };
+
     let resp = client
-        .get(url)
+        .get(&fixed_url)
         .send()
         .await
-        .with_context(|| format!("image fetch failed for {url}"))?;
+        .with_context(|| format!("image fetch failed for {fixed_url}"))?;
+
     if !resp.status().is_success() {
         bail!("image fetch failed: HTTP {}", resp.status());
     }
+
     let bytes = resp.bytes().await.context("reading image body")?;
     let ext = sniff_image_ext(&bytes);
     if ext == "bin" {
         bail!(
-            "unrecognized image format from {url} (first bytes: {:02x?})",
+            "unrecognized image format from {fixed_url} (first bytes: {:02x?})",
             &bytes[..bytes.len().min(16)]
         );
     }
+
     let full_path = PathBuf::from(format!("{}.{}", base_path.to_string_lossy(), ext));
     if let Some(parent) = full_path.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
+
     tokio::fs::write(&full_path, &bytes)
         .await
         .with_context(|| format!("writing image to {}", full_path.display()))?;
+
     Ok(full_path)
 }

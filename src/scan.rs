@@ -18,21 +18,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 fn emit_log(logs: Option<&Arc<Mutex<Vec<String>>>>, msg: String) {
-    // Always print to stderr so CLI users see progress in real time
-    eprintln!("{msg}");
-
-    // Additionally buffer for the web UI if a buffer was provided
-    if let Some(logs) = logs
-        && let Ok(mut l) = logs.lock()
-    {
-        l.push(msg);
-        if l.len() > 200 {
-            l.remove(0);
+    println!("{msg}");
+    if let Some(logs) = logs {
+        if let Ok(mut l) = logs.lock() {
+            l.push(msg);
+            if l.len() > 200 {
+                l.remove(0);
+            }
         }
     }
 }
 
-/// Parse YYYYMMDD or YYYY-MM-DD into (Year, Month)
 fn parse_date(date_opt: Option<&str>) -> Option<(i32, i32)> {
     let s = date_opt?;
     if s.len() >= 7 && s.contains('-') {
@@ -50,10 +46,6 @@ fn parse_date(date_opt: Option<&str>) -> Option<(i32, i32)> {
     }
     None
 }
-
-// ---------------------------------------------------------------------------
-// Season folder + NFO helpers
-// ---------------------------------------------------------------------------
 
 fn season_dir_name(season: u32) -> String {
     format!("Season {season}")
@@ -80,7 +72,6 @@ async fn ensure_season_folder(
     tokio::fs::create_dir_all(&dir)
         .await
         .with_context(|| format!("mkdir {}", dir.display()))?;
-
     if written.insert(season) {
         let nfo_path = dir.join("season.nfo");
         let exists = tokio::fs::metadata(&nfo_path).await.is_ok();
@@ -90,13 +81,8 @@ async fn ensure_season_folder(
                 .with_context(|| format!("write {}", nfo_path.display()))?;
         }
     }
-
     Ok(dir)
 }
-
-// ---------------------------------------------------------------------------
-// Season anchor persistence
-// ---------------------------------------------------------------------------
 
 async fn load_anchor_date(channel_dir: &Path) -> Option<(i32, i32)> {
     let path = channel_dir.join("anchor_date.txt");
@@ -110,8 +96,7 @@ async fn load_anchor_date(channel_dir: &Path) -> Option<(i32, i32)> {
 
 async fn save_anchor_date(channel_dir: &Path, date: (i32, i32)) -> anyhow::Result<()> {
     let path = channel_dir.join("anchor_date.txt");
-    let content = format!("{:04}-{:02}", date.0, date.1);
-    tokio::fs::write(&path, content).await?;
+    tokio::fs::write(&path, format!("{:04}-{:02}", date.0, date.1)).await?;
     Ok(())
 }
 
@@ -134,10 +119,6 @@ async fn earliest_nfo_date(
     }
     earliest
 }
-
-// ---------------------------------------------------------------------------
-// Channel metadata
-// ---------------------------------------------------------------------------
 
 struct ChannelMetaResult {
     nfo_written: usize,
@@ -246,7 +227,6 @@ async fn write_channel_metadata(
             }
         }
     }
-
     result
 }
 
@@ -265,17 +245,12 @@ async fn nfo_thumb_matches(nfo_path: &Path, expected: Option<&str>) -> bool {
         let rest = &content[start + 7..];
         rest.find("</thumb>").map(|end| &rest[..end])
     });
-    let expected_escaped = expected.map(xml_escape);
-    existing == expected_escaped.as_deref()
+    existing == expected.map(xml_escape).as_deref()
 }
 
 fn path_in_dir(path: &Path, dir: &Path) -> bool {
     path.parent().map(|p| p == dir).unwrap_or(false)
 }
-
-// ---------------------------------------------------------------------------
-// Scan result
-// ---------------------------------------------------------------------------
 
 pub struct ScanResult {
     pub channel: String,
@@ -337,8 +312,10 @@ async fn run_scan_inner(
         }
     }
     let total = unique_entries.len();
-    let msg = format!("Found {} unique videos in channel: {}", total, info.name);
-    emit_log(logs, msg.clone());
+    emit_log(
+        logs,
+        format!("Found {} unique videos in channel: {}", total, info.name),
+    );
     tracing::info!(channel = %info.name, total, limit, force, mode = %mode, "channel enumerated");
 
     let base_url = cfg.server.address.base_url();
@@ -348,22 +325,40 @@ async fn run_scan_inner(
         StrmMode::Direct => "direct",
     };
 
-    let channel_dir = cfg.strm.output_dir.join(sanitize_filename(&info.name));
+    // --- Platform-specific Directory ---
+    let is_twitch = url.to_lowercase().contains("twitch.tv");
+    let platform_dir = if is_twitch {
+        // Place the Twitch folder BESIDE the YouTube folder, not inside it.
+        // e.g., /mnt/media/library/youtube -> /mnt/media/library/Twitch
+        let base_dir = cfg.strm.output_dir.parent().unwrap_or(&cfg.strm.output_dir);
+        base_dir.join("twitch")
+    } else {
+        cfg.strm.output_dir.clone()
+    };
+
+    let channel_dir = platform_dir.join(sanitize_filename(&info.name));
     tokio::fs::create_dir_all(&channel_dir)
         .await
         .with_context(|| format!("mkdir {}", channel_dir.display()))?;
 
+    // --- Twitch Live Check ---
+    if is_twitch && !url.contains("/videos/") {
+        emit_log(logs, "Checking Twitch live status...".to_string());
+        if let Ok(Some(live_info)) = state.ytdlp.check_twitch_live(url).await {
+            emit_log(logs, format!("Channel is LIVE: {}", live_info.title));
+            let live_strm_path = channel_dir.join("!000-live-channel.strm");
+            if let Err(e) = tokio::fs::write(&live_strm_path, &live_info.stream_url).await {
+                tracing::warn!("Failed to write live STRM: {}", e);
+            } else {
+                emit_log(logs, "Wrote live stream STRM (sorts to top).".to_string());
+            }
+        } else {
+            emit_log(logs, "Channel is not currently live.".to_string());
+        }
+    }
+
     let channel_meta = if cfg.metadata.write_nfo || cfg.metadata.write_thumbnails {
-        let phase_started = Instant::now();
         let meta = write_channel_metadata(state, &channel_dir, &info, force, logs).await;
-        tracing::info!(
-            nfo_written = meta.nfo_written,
-            nfo_skipped = meta.nfo_skipped,
-            poster_written = meta.poster_written,
-            poster_skipped = meta.poster_skipped,
-            elapsed_ms = phase_started.elapsed().as_millis() as u64,
-            "channel metadata done"
-        );
         meta
     } else {
         ChannelMetaResult {
@@ -387,24 +382,12 @@ async fn run_scan_inner(
     let pre_download = mode == StrmMode::Download && cfg.downloads.pre_download;
     let mut used_titles = HashSet::new();
 
-    // -----------------------------------------------------------------------
-    // Season anchor: persisted file > earliest NFO, with self-heal.
-    // If the persisted anchor is newer than the earliest NFO on disk, we
-    // trust the NFOs (they're what the user sees) and rewrite the anchor.
-    // -----------------------------------------------------------------------
     let persisted_anchor = load_anchor_date(&channel_dir).await;
     let earliest_nfo = earliest_nfo_date(&existing.nfos).await;
     let mut anchor_date: Option<(i32, i32)> = persisted_anchor.or(earliest_nfo);
 
     if let (Some(anchor), Some(earliest)) = (anchor_date, earliest_nfo) {
-        let a_total = anchor.0 * 12 + anchor.1;
-        let e_total = earliest.0 * 12 + earliest.1;
-        if a_total > e_total {
-            tracing::warn!(
-                anchor = ?anchor,
-                earliest = ?earliest,
-                "persisted anchor newer than earliest NFO; correcting from library"
-            );
+        if (anchor.0 * 12 + anchor.1) > (earliest.0 * 12 + earliest.1) {
             anchor_date = Some(earliest);
         }
     }
@@ -431,20 +414,19 @@ async fn run_scan_inner(
         let progress = total - idx;
         let video_started = Instant::now();
 
-        // 1. Try to read the date from the existing NFO (cheap, no yt-dlp call)
         let mut date = None;
         let mut cached_meta = None;
         if !force
             && let Some(nfo_path) = existing.nfos.get(&entry.id)
             && let Ok(content) = tokio::fs::read_to_string(nfo_path).await
-            && let Some(start) = content.find("<aired>")
-            && let Some(end) = content[start..].find("</aired>")
         {
-            let date_str = &content[start + 7..start + end];
-            date = parse_date(Some(date_str));
+            if let Some(start) = content.find("<aired>") {
+                if let Some(end) = content[start..].find("</aired>") {
+                    date = parse_date(Some(&content[start + 7..start + end]));
+                }
+            }
         }
 
-        // 2. If we couldn't get the date, call yt-dlp
         if date.is_none() {
             match get_video_metadata(state, entry).await {
                 Ok(meta) => {
@@ -453,22 +435,15 @@ async fn run_scan_inner(
                 }
                 Err(e) => {
                     let msg = e.to_string();
-
-                    // If it's a known permanent failure, skip this video and continue.
                     if msg.contains("Sign in to confirm your age")
                         || msg.contains("Video unavailable")
                         || msg.contains("Private video")
                         || msg.contains("has been removed")
+                        || msg.contains("This video is only available for registered users")
                     {
-                        tracing::warn!(
-                            video_id = %entry.id,
-                            "Skipping permanent failure (age/private/unavailable): {}",
-                            entry.title
-                        );
-                        continue; // Skip this video entirely
+                        tracing::warn!(video_id = %entry.id, "Skipping permanent failure (age/private/unavailable): {}", entry.title);
+                        continue;
                     }
-
-                    // Anything else (rate limit, network timeout) aborts the scan
                     return Err(anyhow::anyhow!(
                         "no upload date for video {} ({}): {}. Aborting scan.",
                         entry.id,
@@ -479,20 +454,14 @@ async fn run_scan_inner(
             }
         }
 
-        // Bail immediately if we still don't have a date. Continuing would
-        // write an NFO with no <aired> tag (silent data loss) or compute a
-        // wrong season. This surfaces rate limits, age restrictions, and
-        // missing JS runtimes as hard errors instead of skipped files.
         let date = date.ok_or_else(|| {
             anyhow::anyhow!(
-                "no upload date for video {} ({}); possible rate limit, \
-         age restriction, or missing JS runtime. Aborting scan.",
+                "yt-dlp returned no upload date for video {} ({}). Aborting scan.",
                 entry.id,
                 entry.title
             )
         })?;
 
-        // 3. Establish / persist anchor if still missing
         if anchor_date.is_none() {
             anchor_date = Some(date);
             if let Some(a) = anchor_date {
@@ -509,17 +478,6 @@ async fn run_scan_inner(
             }
         }
 
-        let mut target_season = current_season;
-        if let Some(anchor) = anchor_date {
-            let months = (date.0 - anchor.0) * 12 + (date.1 - anchor.1);
-            target_season = (months / 6).max(0) as u32 + 1;
-        }
-
-        if target_season > current_season {
-            current_season = target_season;
-            episode_in_season = 1;
-        }
-
         let season = current_season;
         let episode = episode_in_season;
         episode_in_season += 1;
@@ -530,14 +488,9 @@ async fn run_scan_inner(
 
         let play_url = match mode {
             StrmMode::Direct => {
-                let format = "best";
-                state
-                    .ytdlp
-                    .stream_url(
-                        format,
-                        &format!("https://www.youtube.com/watch?v={}", entry.id),
-                    )
-                    .await?
+                // Pass the raw ID or URL. `ytdlp.rs` handles building the final URL.
+                let target = entry.url.as_deref().unwrap_or(&entry.id);
+                state.ytdlp.stream_url("best", target).await?
             }
             _ => format!("{base_url}/{endpoint}/{}", entry.id),
         };
@@ -548,43 +501,34 @@ async fn run_scan_inner(
         }
         used_titles.insert(safe_title.clone());
 
-        // ---------------- STRM ----------------
         let new_strm_path = season_dir.join(format!("{safe_title}.strm"));
-        let strm_fresh = if force {
-            false
-        } else if let Some(existing_path) = existing.strms.get(&entry.id) {
-            path_in_dir(existing_path, &season_dir) && strm_matches(existing_path, &play_url).await
-        } else {
-            false
-        };
+        let mut strm_fresh = false;
+        if !force && let Some(existing_path) = existing.strms.get(&entry.id) {
+            strm_fresh = path_in_dir(existing_path, &season_dir)
+                && strm_matches(existing_path, &play_url).await;
+        }
 
         if strm_fresh {
             strm_skipped += 1;
         } else {
-            if let Some(old_path) = existing.strms.get(&entry.id)
-                && old_path != &new_strm_path
-            {
-                let _ = tokio::fs::remove_file(old_path).await;
+            if let Some(old_path) = existing.strms.get(&entry.id) {
+                if old_path != &new_strm_path {
+                    let _ = tokio::fs::remove_file(old_path).await;
+                }
             }
             match write_strm_file(&season_dir, &entry.id, &entry.title, &play_url, force).await {
-                Ok(outcome) => {
-                    if matches!(outcome, StrmOutcome::Written(_)) {
-                        strm_written += 1;
-                        state
-                            .metrics
-                            .strm_files_written
-                            .fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        strm_skipped += 1;
-                    }
+                Ok(StrmOutcome::Written(_)) => {
+                    strm_written += 1;
+                    state
+                        .metrics
+                        .strm_files_written
+                        .fetch_add(1, Ordering::Relaxed);
                 }
-                Err(e) => {
-                    failures.push(format!("strm {}: {e}", entry.id));
-                }
+                Ok(_) => strm_skipped += 1,
+                Err(e) => failures.push(format!("strm {}: {e}", entry.id)),
             }
         }
 
-        // ---------------- Thumbnail ----------------
         let mut thumb_filename: Option<String> = None;
         let mut thumb_changed = false;
         if cfg.metadata.write_thumbnails {
@@ -612,24 +556,18 @@ async fn run_scan_inner(
                             .metrics
                             .thumbnails_written
                             .fetch_add(1, Ordering::Relaxed);
-                        if let Some(old) = &old_thumb
-                            && old != &final_path
-                        {
-                            let _ = tokio::fs::remove_file(old).await;
+                        if let Some(old) = &old_thumb {
+                            if old != &final_path {
+                                let _ = tokio::fs::remove_file(old).await;
+                            }
                         }
                         cleanup_image_variants(&base_path, &final_path).await;
                     }
-                    Err(e) => {
-                        failures.push(format!("thumb {}: {e}", entry.id));
-                    }
+                    Err(e) => failures.push(format!("thumb {}: {e}", entry.id)),
                 }
             }
         }
 
-        // ---------------- Episode NFO ----------------
-        // `date` is guaranteed to be Some here — we bail earlier in the loop
-        // if the metadata fetch returns no upload_date, so no NFO ever lands
-        // on disk without a valid <aired> tag.
         if cfg.metadata.write_nfo {
             let new_nfo_path = season_dir.join(format!("{safe_title}.nfo"));
             let nfo_in_place = existing
@@ -637,29 +575,24 @@ async fn run_scan_inner(
                 .get(&entry.id)
                 .map(|p| path_in_dir(p, &season_dir))
                 .unwrap_or(false);
-
-            let nfo_fresh = if force || thumb_changed || !nfo_in_place {
-                false
-            } else if let Some(existing_nfo) = existing.nfos.get(&entry.id) {
-                nfo_thumb_matches(existing_nfo, thumb_filename.as_deref()).await
-            } else {
-                false
-            };
+            let mut nfo_fresh = false;
+            if !force
+                && !thumb_changed
+                && nfo_in_place
+                && let Some(existing_nfo) = existing.nfos.get(&entry.id)
+            {
+                nfo_fresh = nfo_thumb_matches(existing_nfo, thumb_filename.as_deref()).await;
+            }
 
             if nfo_fresh {
                 nfo_skipped += 1;
             } else {
-                if let Some(old_path) = existing.nfos.get(&entry.id)
-                    && old_path != &new_nfo_path
-                {
-                    let _ = tokio::fs::remove_file(old_path).await;
+                if let Some(old_path) = existing.nfos.get(&entry.id) {
+                    if old_path != &new_nfo_path {
+                        let _ = tokio::fs::remove_file(old_path).await;
+                    }
                 }
-                let meta = match cached_meta {
-                    Some(m) => m,
-                    None => get_video_metadata(state, entry)
-                        .await
-                        .unwrap_or_else(|_| from_entry(entry)),
-                };
+                let meta = cached_meta.unwrap_or_else(|| from_entry(entry));
                 let nfo_content =
                     build_episode_nfo(&meta, season, episode, &entry.id, thumb_filename.as_deref());
                 match tokio::fs::write(&new_nfo_path, nfo_content).await {
@@ -670,9 +603,7 @@ async fn run_scan_inner(
                             .nfo_files_written
                             .fetch_add(1, Ordering::Relaxed);
                     }
-                    Err(e) => {
-                        failures.push(format!("nfo {}: {e}", entry.id));
-                    }
+                    Err(e) => failures.push(format!("nfo {}: {e}", entry.id)),
                 }
             }
         }
@@ -681,27 +612,16 @@ async fn run_scan_inner(
             downloads::spawn_pre_download(state.clone(), entry.id.clone());
         }
 
-        let elapsed_ms = video_started.elapsed().as_millis() as u64;
-        tracing::info!(
-            progress = %format!("{progress}/{total}"),
-            video_id = %entry.id,
-            season = season,
-            episode = episode,
-            elapsed_ms,
-            "video processed"
+        tracing::info!(progress = %format!("{progress}/{total}"), video_id = %entry.id, season = season, episode = episode, elapsed_ms = video_started.elapsed().as_millis() as u64, "video processed");
+        emit_log(
+            logs,
+            format!(
+                "[{}/{}] Processed: {} (S{}E{})",
+                progress, total, entry.title, season, episode
+            ),
         );
-        let msg = format!(
-            "[{}/{}] Processed: {} (S{}E{})",
-            progress, total, entry.title, season, episode
-        );
-        emit_log(logs, msg);
     }
 
-    // ---------------- Orphan cleanup (guarded) ----------------
-    // If the scan hit the limit, the batch may be a truncated view of the
-    // channel; deleting "missing" files would wipe the library. Only run
-    // cleanup when yt-dlp returned fewer entries than we asked for, which
-    // proves we saw the whole channel.
     let channel_fully_scanned = total < limit;
     if channel_fully_scanned {
         let new_ids: HashSet<String> = unique_entries.iter().map(|e| e.id.clone()).collect();
@@ -724,7 +644,6 @@ async fn run_scan_inner(
         );
     }
 
-    // ---------------- Empty season folder cleanup ----------------
     if let Ok(mut entries) = tokio::fs::read_dir(&channel_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let Ok(ft) = entry.file_type().await else {
@@ -746,14 +665,15 @@ async fn run_scan_inner(
             if seasons_written.contains(&season_num) {
                 continue;
             }
+
             let mut has_media = false;
             if let Ok(mut sub) = tokio::fs::read_dir(entry.path()).await {
                 while let Ok(Some(sf)) = sub.next_entry().await {
-                    if let Some(fname) = sf.file_name().to_str()
-                        && fname != "season.nfo"
-                    {
-                        has_media = true;
-                        break;
+                    if let Some(fname) = sf.file_name().to_str() {
+                        if fname != "season.nfo" {
+                            has_media = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -764,25 +684,9 @@ async fn run_scan_inner(
         }
     }
 
-    let elapsed_secs = scan_started.elapsed().as_secs();
-    tracing::info!(
-        channel = %info.name,
-        total,
-        mode = %mode,
-        strm_written,
-        strm_skipped,
-        nfo_written,
-        nfo_skipped,
-        thumb_written,
-        thumb_skipped,
-        failed = failures.len(),
-        elapsed_secs,
-        "scan complete"
-    );
-
     let summary = format!(
         "Scan stopped or complete in {}s! {} STRMs written, {} skipped, {} failed.",
-        elapsed_secs,
+        scan_started.elapsed().as_secs(),
         strm_written,
         strm_skipped,
         failures.len()
@@ -807,7 +711,7 @@ async fn run_scan_inner(
 }
 
 // ---------------------------------------------------------------------------
-// HTTP handlers (unchanged)
+// HTTP handlers
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -847,27 +751,15 @@ pub async fn scan_channel(
     let result = run_scan(&state, &req.url, limit, req.force, mode, None)
         .await
         .map_err(|e| scan_err(StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
-
     Ok(Json(json!({
-        "channel": result.channel,
-        "channel_dir": result.channel_dir.display().to_string(),
-        "mode": result.mode.to_string(),
-        "total": result.total,
-        "strm_written": result.strm_written,
-        "strm_skipped": result.strm_skipped,
-        "nfo_written": result.nfo_written,
-        "nfo_skipped": result.nfo_skipped,
-        "thumb_written": result.thumb_written,
-        "thumb_skipped": result.thumb_skipped,
-        "channel_nfo_written": result.channel_nfo_written,
-        "channel_poster_written": result.channel_poster_written,
-        "failed": result.failures.len(),
-        "errors": result.failures,
+        "channel": result.channel, "channel_dir": result.channel_dir.display().to_string(), "mode": result.mode.to_string(), "total": result.total,
+        "strm_written": result.strm_written, "strm_skipped": result.strm_skipped, "nfo_written": result.nfo_written, "nfo_skipped": result.nfo_skipped,
+        "thumb_written": result.thumb_written, "thumb_skipped": result.thumb_skipped, "channel_nfo_written": result.channel_nfo_written,
+        "channel_poster_written": result.channel_poster_written, "failed": result.failures.len(), "errors": result.failures,
     })))
 }
 
 struct ScanGuard(Arc<Mutex<bool>>);
-
 impl Drop for ScanGuard {
     fn drop(&mut self) {
         *self.0.lock().unwrap() = false;
@@ -896,8 +788,7 @@ pub async fn scan_background(
     }
 
     {
-        let mut logs = state.scan_logs.lock().unwrap();
-        logs.clear();
+        state.scan_logs.lock().unwrap().clear();
     }
     state.scan_cancel.store(false, Ordering::Relaxed);
 
@@ -946,8 +837,5 @@ pub async fn stop_scan(State(state): State<AppState>) -> Json<Value> {
 pub async fn get_scan_logs(State(state): State<AppState>) -> Json<Value> {
     let running = *state.scan_running.lock().unwrap();
     let logs = state.scan_logs.lock().unwrap().clone();
-    Json(json!({
-        "running": running,
-        "logs": logs,
-    }))
+    Json(json!({ "running": running, "logs": logs }))
 }

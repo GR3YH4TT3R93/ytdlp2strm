@@ -14,7 +14,7 @@ use crate::sponsorblock::SponsorBlock;
 use crate::ytdlp::Ytdlp;
 
 const RESOLVE_TTL: Duration = Duration::from_secs(300);
-const MAX_CACHE_SIZE: usize = 50; // <-- Add this
+const MAX_CACHE_SIZE: usize = 50;
 
 #[derive(Clone)]
 pub struct ResolveCache(Arc<Mutex<HashMap<String, (Value, Instant)>>>);
@@ -24,20 +24,39 @@ impl ResolveCache {
         Self(Arc::new(Mutex::new(HashMap::new())))
     }
 
-    pub async fn get_or_resolve(&self, ytdlp: &Ytdlp, video_id: &str) -> anyhow::Result<Value> {
+    // UPDATED: Added url_override to handle Twitch VODs
+    pub async fn get_or_resolve(
+        &self,
+        ytdlp: &Ytdlp,
+        video_id: &str,
+        url_override: Option<&str>,
+    ) -> anyhow::Result<Value> {
         {
             let cache = self.0.lock().unwrap();
             if let Some((json, ts)) = cache.get(video_id)
-                && ts.elapsed() < RESOLVE_TTL {
-                    return Ok(json.clone());
-                }
+                && ts.elapsed() < RESOLVE_TTL
+            {
+                return Ok(json.clone());
+            }
         }
-        let url = format!("https://www.youtube.com/watch?v={video_id}");
+
+        // UPDATED: Determine the correct URL (YouTube vs Twitch)
+        let url = match url_override {
+            Some(u) => u.to_string(),
+            None => {
+                if video_id.starts_with('v') && video_id.len() > 5 {
+                    format!("https://www.twitch.tv/videos/{}", &video_id[1..])
+                } else {
+                    format!("https://www.youtube.com/watch?v={}", video_id)
+                }
+            }
+        };
+
         let json = ytdlp.resolve(&url).await?;
         {
             let mut cache = self.0.lock().unwrap();
 
-            // <-- Add this eviction logic
+            // <-- Your custom eviction logic
             if cache.len() >= MAX_CACHE_SIZE {
                 cache.clear();
             }
@@ -59,9 +78,10 @@ impl PlaylistCache {
     pub fn get(&self, key: &str) -> Option<String> {
         let cache = self.0.lock().unwrap();
         if let Some((val, ts)) = cache.get(key)
-            && ts.elapsed() < Duration::from_secs(7200) {
-                return Some(val.clone());
-            }
+            && ts.elapsed() < Duration::from_secs(7200)
+        {
+            return Some(val.clone());
+        }
         None
     }
 

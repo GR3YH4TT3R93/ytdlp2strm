@@ -51,11 +51,10 @@ pub async fn get_video_metadata(
 ) -> anyhow::Result<VideoMetadata> {
     let cfg = state.config();
     if cfg.metadata.metadata_level == MetadataLevel::Full {
-        // Propagate the error so `scan.rs` can decide whether to skip
-        // (age-restricted / deleted / private) or abort (rate limit).
+        // Pass entry.url to handle Twitch correctly
         let json = state
             .resolve_cache
-            .get_or_resolve(&state.ytdlp, &entry.id)
+            .get_or_resolve(&state.ytdlp, &entry.id, entry.url.as_deref())
             .await?;
         Ok(metadata_from_json(&json))
     } else {

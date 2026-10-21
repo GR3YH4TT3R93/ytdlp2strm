@@ -33,9 +33,7 @@ impl StreamKind {
                         && f.get("vcodec")
                             .and_then(|v| v.as_str())
                             .is_some_and(|v| v != "none")
-                        && f.get("acodec")
-                            .and_then(|v| v.as_str())
-                            .is_none_or(|a| a == "none")
+                    // FIX: Removed the requirement for acodec == "none" so it accepts Twitch's muxed streams
                 }
                 StreamKind::Audio => {
                     is_hls(f) && f.get("vcodec").and_then(|v| v.as_str()) == Some("none")
@@ -46,20 +44,22 @@ impl StreamKind {
         candidates.sort_by_key(|f| match self {
             StreamKind::Video => {
                 let h = f.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-                let is_vp9 = f
-                    .get("vcodec")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|v| v.starts_with("vp09")) as u64;
-                (h, is_vp9)
+                let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("");
+                let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("");
+
+                let is_video_only = (acodec == "none") as u64;
+                let is_h264 = vcodec.starts_with("avc") as u64;
+                (is_video_only, is_h264, h)
             }
             StreamKind::Audio => {
                 let abr = f.get("abr").and_then(|v| v.as_u64()).unwrap_or(0);
-                // FIX: Prioritize Opus (itag 251/233) so audio is fMP4 to match the VP9 video
                 let is_opus =
                     f.get("format_id")
                         .and_then(|v| v.as_str())
                         .is_some_and(|id| id == "251" || id == "233") as u64;
-                (is_opus, abr)
+
+                // FIX: Added a third `0` to match the video tuple size
+                (is_opus, abr, 0)
             }
         });
 
@@ -90,10 +90,9 @@ pub async fn direct_redirect(
     }
 
     let format = "best";
-    let video_url = format!("https://www.youtube.com/watch?v={video_id}");
     let url = state
         .ytdlp
-        .stream_url(format, &video_url)
+        .stream_url(format, &video_id)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("yt-dlp failed: {e}")))?;
 
@@ -124,7 +123,7 @@ async fn build_filtered_playlist(
 
     let json = state
         .resolve_cache
-        .get_or_resolve(&state.ytdlp, video_id)
+        .get_or_resolve(&state.ytdlp, video_id, None)
         .await?;
 
     let format_id: String = if let Some(fid) = forced_format_id {
@@ -139,13 +138,11 @@ async fn build_filtered_playlist(
             .to_string()
     };
 
-    let video_url = format!("https://www.youtube.com/watch?v={video_id}");
-
     let url_cache_key = format!("streamurl_{}_{}", video_id, format_id);
     let media_manifest_url = if let Some(cached_url) = state.playlist_cache.get(&url_cache_key) {
         cached_url
     } else {
-        let url = state.ytdlp.stream_url(&format_id, &video_url).await?;
+        let url = state.ytdlp.stream_url(&format_id, video_id).await?;
         state.playlist_cache.set(url_cache_key, url.clone());
         url
     };
@@ -188,7 +185,7 @@ async fn build_master_body(
 
     let json = state
         .resolve_cache
-        .get_or_resolve(&state.ytdlp, video_id)
+        .get_or_resolve(&state.ytdlp, video_id, None)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{e:#}")))?;
 
@@ -229,7 +226,6 @@ async fn build_master_body(
         .unwrap_or(0);
     let width = video_fmt.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
 
-    // FIX: Ensure Opus formats (251/233) report "opus" in the master playlist
     let acodec = if audio_format_id == "251" || audio_format_id == "233" {
         "opus"
     } else {
@@ -352,16 +348,23 @@ pub async fn bridge_segment(
         .get("u")
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "missing u parameter".to_string()))?;
 
-    let mut req = state
-        .http
-        .get(url)
-        .header(reqwest::header::REFERER, "https://www.youtube.com/")
-        .header(reqwest::header::ORIGIN, "https://www.youtube.com");
+    let mut req = state.http.get(url);
+
+    if url.contains("youtube.com") || url.contains("googlevideo.com") {
+        req = req
+            .header(reqwest::header::REFERER, "https://www.youtube.com/")
+            .header(reqwest::header::ORIGIN, "https://www.youtube.com");
+    } else if url.contains("twitch.tv") {
+        req = req
+            .header(reqwest::header::REFERER, "https://www.twitch.tv/")
+            .header(reqwest::header::ORIGIN, "https://www.twitch.tv");
+    }
 
     if let Some(range) = headers.get(header::RANGE)
-        && let Ok(range_str) = range.to_str() {
-            req = req.header(reqwest::header::RANGE, range_str);
-        }
+        && let Ok(range_str) = range.to_str()
+    {
+        req = req.header(reqwest::header::RANGE, range_str);
+    }
 
     let resp = match req.send().await {
         Ok(r) => r,
@@ -405,9 +408,10 @@ pub async fn bridge_segment(
         reqwest::header::ACCEPT_RANGES,
     ] {
         if let Some(v) = resp.headers().get(&h)
-            && let Ok(v) = v.to_str() {
-                builder = builder.header(h.as_str(), v);
-            }
+            && let Ok(v) = v.to_str()
+        {
+            builder = builder.header(h.as_str(), v);
+        }
     }
 
     Ok(builder

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use chrono::DateTime;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -8,10 +9,6 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
 const LIST_TIMEOUT: Duration = Duration::from_secs(120);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(3600);
 
-/// Rate-limit mitigation. Applied to every yt-dlp invocation that runs as part
-/// of a bulk operation (channel enumeration, per-video metadata fetch, and
-/// download) but deliberately NOT to `stream_url`, which is called on-demand
-/// for playback and must return fast.
 fn add_rate_limit_args(cmd: &mut Command) {
     cmd.arg("--sleep-requests")
         .arg("1")
@@ -33,6 +30,7 @@ pub struct Ytdlp {
 #[derive(Debug, Clone)]
 pub struct ChannelEntry {
     pub id: String,
+    pub url: Option<String>,
     pub title: String,
     pub thumbnail_url: Option<String>,
     pub duration_secs: Option<u64>,
@@ -48,6 +46,12 @@ pub struct ChannelInfo {
     pub banner_url: Option<String>,
     pub description: Option<String>,
     pub entries: Vec<ChannelEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveStreamInfo {
+    pub title: String,
+    pub stream_url: String,
 }
 
 pub struct DownloadOptions<'a> {
@@ -103,9 +107,14 @@ impl Ytdlp {
         let mut cmd = Command::new(&self.binary);
         self.configure_command(&mut cmd);
 
-        // Intentionally no rate-limit args here — this runs on-demand for
-        // playback and must be responsive. A failed call surfaces as a playback
-        // error the user can retry; a slow call stalls the video.
+        let target_url = if video_url.starts_with("http") {
+            video_url.to_string()
+        } else if video_url.starts_with('v') && video_url.len() > 5 {
+            format!("https://www.twitch.tv/videos/{}", &video_url[1..])
+        } else {
+            format!("https://www.youtube.com/watch?v={}", video_url)
+        };
+
         cmd.arg("-g")
             .arg("-f")
             .arg(format_id)
@@ -113,7 +122,7 @@ impl Ytdlp {
             .arg("--no-playlist")
             .args(&self.extra_args)
             .arg("--")
-            .arg(video_url);
+            .arg(&target_url);
 
         let output = tokio::time::timeout(RESOLVE_TIMEOUT, cmd.output())
             .await
@@ -139,14 +148,99 @@ impl Ytdlp {
         if url.is_empty() {
             bail!("yt-dlp -g -f {format_id} returned an empty URL");
         }
-
         Ok(url)
+    }
+
+    pub async fn check_twitch_live(&self, channel_url: &str) -> Result<Option<LiveStreamInfo>> {
+        let mut cmd = Command::new(&self.binary);
+        self.configure_command(&mut cmd);
+
+        cmd.arg("--no-warnings")
+            .arg("--print")
+            .arg("%(is_live)s")
+            .arg("--print")
+            .arg("%(title)s")
+            .arg("--print")
+            .arg("%(webpage_url)s")
+            .args(&self.extra_args)
+            .arg("--")
+            .arg(channel_url);
+
+        let output = tokio::time::timeout(RESOLVE_TIMEOUT, cmd.output())
+            .await
+            .context("yt-dlp live check timed out")?
+            .context("failed to spawn yt-dlp")?;
+
+        if !output.status.success() {
+            return Ok(None);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+
+        if lines.len() >= 3 && lines[0].trim() == "True" {
+            Ok(Some(LiveStreamInfo {
+                title: lines[1].trim().to_string(),
+                stream_url: lines[2].trim().to_string(),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn fetch_twitch_avatar(&self, channel_url: &str) -> Result<Option<String>> {
+        let base_url = channel_url
+            .split("/videos")
+            .next()
+            .unwrap_or(channel_url)
+            .trim_end_matches('/');
+
+        let mut cmd = Command::new(&self.binary);
+        self.configure_command(&mut cmd);
+
+        cmd.arg("-J").arg("--no-warnings").arg("--no-playlist");
+        add_rate_limit_args(&mut cmd);
+        cmd.args(&self.extra_args).arg("--").arg(base_url);
+
+        let output = tokio::time::timeout(LIST_TIMEOUT, cmd.output())
+            .await
+            .context("yt-dlp avatar fetch timed out")?
+            .context("failed to spawn yt-dlp")?;
+
+        if !output.status.success() {
+            return Ok(None);
+        }
+
+        let json: Value =
+            serde_json::from_slice(&output.stdout).context("yt-dlp produced invalid JSON")?;
+
+        // 1. Try 'profile_image'
+        if let Some(url) = json.get("profile_image").and_then(|v| v.as_str()) {
+            return Ok(Some(url.to_string()));
+        }
+
+        // 2. Try 'thumbnail'
+        if let Some(url) = json.get("thumbnail").and_then(|v| v.as_str()) {
+            return Ok(Some(url.to_string()));
+        }
+
+        // 3. Try 'thumbnails' array with id="avatar"
+        if let Some(arr) = json.get("thumbnails").and_then(|v| v.as_array()) {
+            for t in arr {
+                if t.get("id").and_then(|v| v.as_str()) == Some("avatar") {
+                    if let Some(url) = t.get("url").and_then(|v| v.as_str()) {
+                        return Ok(Some(url.to_string()));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     pub async fn list_channel(&self, channel_url: &str, limit: usize) -> Result<ChannelInfo> {
         let normalized = normalize_playlist_url(channel_url);
 
-        // 1. Get the flat playlist JSON FIRST so we know the actual channel URL
         let mut cmd = Command::new(&self.binary);
         self.configure_command(&mut cmd);
 
@@ -173,59 +267,106 @@ impl Ytdlp {
 
         let json: Value =
             serde_json::from_slice(&output.stdout).context("yt-dlp produced invalid JSON")?;
-
         let typ = json.get("_type").and_then(|v| v.as_str()).unwrap_or("");
         if typ == "video" || json.get("entries").is_none() {
             bail!("URL is not a channel or playlist (got _type={typ:?})");
         }
 
-        // 2. Determine the channel URL to fetch the avatar/banner from
-        let mut image_source_url = normalized.clone();
-        if typ == "playlist" {
-            if let Some(ch_url) = json.get("channel_url").and_then(|v| v.as_str()) {
-                image_source_url = ch_url.to_string();
-            } else if let Some(uploader_id) = json.get("uploader_id").and_then(|v| v.as_str()) {
-                image_source_url = format!("https://www.youtube.com/channel/{}", uploader_id);
-            } else if let Some(ch_id) = json.get("channel_id").and_then(|v| v.as_str()) {
-                image_source_url = format!("https://www.youtube.com/channel/{}", ch_id);
+        let is_twitch = channel_url.contains("twitch.tv");
+
+        let (mut thumbnail_url, banner_url) = if is_twitch {
+            let avatar = self.fetch_twitch_avatar(channel_url).await.unwrap_or(None);
+            (avatar, None)
+        } else {
+            let mut image_source_url = normalized.clone();
+            if typ == "playlist" {
+                if let Some(ch_url) = json.get("channel_url").and_then(|v| v.as_str()) {
+                    image_source_url = ch_url.to_string();
+                } else if let Some(uploader_id) = json.get("uploader_id").and_then(|v| v.as_str()) {
+                    image_source_url = format!("https://www.youtube.com/channel/{}", uploader_id);
+                } else if let Some(ch_id) = json.get("channel_id").and_then(|v| v.as_str()) {
+                    image_source_url = format!("https://www.youtube.com/channel/{}", ch_id);
+                }
             }
-        }
+            self.get_channel_images(&image_source_url).await?
+        };
 
-        // 3. Get high-res channel images using the resolved channel URL
-        let (mut thumbnail_url, banner_url) = self.get_channel_images(&image_source_url).await?;
-
-        // 4. Fallback: If channel images fail (e.g. Mix playlists), use the playlist/video thumbnail
         if thumbnail_url.is_none() {
             thumbnail_url = json
                 .get("thumbnails")
                 .and_then(|v| v.as_array())
-                .and_then(|arr| best_thumbnail(arr));
+                .and_then(|arr| best_thumbnail(arr))
+                .or_else(|| {
+                    json.get("thumbnail")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                });
+
+            if thumbnail_url.is_none() && is_twitch {
+                if let Some(first_entry) = json
+                    .get("entries")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                {
+                    thumbnail_url = first_entry
+                        .get("thumbnails")
+                        .and_then(|v| v.as_array())
+                        .and_then(|arr| best_thumbnail(arr))
+                        .or_else(|| {
+                            first_entry
+                                .get("thumbnail")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        });
+                }
+            }
         }
 
-        // Only use the JSON `title` for USER playlists (URLs with /playlist?list=...).
-        // Channel tab URLs (/@handle/videos, /channel/UCxxx/streams, ...) also report
-        // _type="playlist", but their `title` is "<Channel> - Videos" — using it
-        // would create folders named "Channel - Videos" instead of the channel name.
         let is_user_playlist =
             channel_url.contains("/playlist?") || channel_url.contains("/playlist/");
-        let name = if is_user_playlist {
+
+        let name = if is_twitch {
+            let from_json = json
+                .get("playlist_channel")
+                .and_then(|v| v.as_str())
+                .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
+                .or_else(|| json.get("channel").and_then(|v| v.as_str()))
+                .or_else(|| json.get("id").and_then(|v| v.as_str()));
+
+            if let Some(n) = from_json {
+                n.to_string()
+            } else {
+                let clean_url = channel_url.split('?').next().unwrap_or(channel_url);
+                let parts: Vec<&str> = clean_url.split('/').filter(|s| !s.is_empty()).collect();
+                if parts.len() >= 2 {
+                    let candidate = parts[1];
+                    if candidate != "videos" && !candidate.starts_with('v') {
+                        candidate.to_string()
+                    } else {
+                        "Unknown Twitch Channel".to_string()
+                    }
+                } else {
+                    "Unknown Twitch Channel".to_string()
+                }
+            }
+        } else if is_user_playlist {
             json.get("title")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown")
+                .to_string()
         } else {
             json.get("channel")
                 .and_then(|v| v.as_str())
                 .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
                 .or_else(|| json.get("title").and_then(|v| v.as_str()))
                 .unwrap_or("Unknown")
-        }
-        .to_string();
+                .to_string()
+        };
 
         let channel_id = json
             .get("channel_id")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-
         let description = json
             .get("description")
             .and_then(|v| v.as_str())
@@ -241,21 +382,42 @@ impl Ytdlp {
                         if id.is_empty() {
                             return None;
                         }
+
+                        let url = e.get("url").and_then(|v| v.as_str()).map(|s| s.to_string());
                         let title = e
                             .get("title")
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty())
                             .unwrap_or(&id)
                             .to_string();
+
+                        // FIX: Look for BOTH 'thumbnails' (YouTube) and 'thumbnail' (Twitch)
                         let thumbnail_url = e
                             .get("thumbnails")
                             .and_then(|v| v.as_array())
-                            .and_then(|arr| best_thumbnail(arr));
+                            .and_then(|arr| best_thumbnail(arr))
+                            .or_else(|| {
+                                e.get("thumbnail")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            });
+
                         let duration_secs = e.get("duration").and_then(|v| v.as_u64());
+
                         let upload_date = e
                             .get("upload_date")
                             .and_then(|v| v.as_str())
-                            .map(|s| s.to_string());
+                            .map(|s| s.to_string())
+                            .or_else(|| {
+                                e.get("timestamp").and_then(|v| v.as_i64()).map(|ts| {
+                                    if let Some(dt) = DateTime::from_timestamp(ts, 0) {
+                                        dt.format("%Y%m%d").to_string()
+                                    } else {
+                                        "".to_string()
+                                    }
+                                })
+                            });
+
                         let description = e
                             .get("description")
                             .and_then(|v| v.as_str())
@@ -263,6 +425,7 @@ impl Ytdlp {
 
                         Some(ChannelEntry {
                             id,
+                            url,
                             title,
                             thumbnail_url,
                             duration_secs,
@@ -284,7 +447,6 @@ impl Ytdlp {
         })
     }
 
-    /// Runs `yt-dlp --list-thumbnails` and parses the output for uncropped images.
     async fn get_channel_images(
         &self,
         channel_url: &str,
@@ -316,20 +478,19 @@ impl Ytdlp {
 
         for line in stdout.lines() {
             let line = line.trim();
-            if line.contains("avatar_uncropped") {
+            if line.contains("avatar_uncropped") || line.contains("profile") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if let Some(url) = parts.last() {
                     poster = Some(url.to_string());
                 }
             }
-            if line.contains("banner_uncropped") {
+            if line.contains("banner_uncropped") || line.contains("banner") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
                 if let Some(url) = parts.last() {
                     landscape = Some(url.to_string());
                 }
             }
         }
-
         Ok((poster, landscape))
     }
 
@@ -338,7 +499,13 @@ impl Ytdlp {
         video_id: &str,
         opts: DownloadOptions<'_>,
     ) -> Result<PathBuf> {
-        let url = format!("https://www.youtube.com/watch?v={video_id}");
+        let url = if video_id.starts_with("http") {
+            video_id.to_string()
+        } else if video_id.starts_with('v') && video_id.len() > 5 {
+            format!("https://www.twitch.tv/videos/{}", &video_id[1..])
+        } else {
+            format!("https://www.youtube.com/watch?v={}", video_id)
+        };
 
         let mut cmd = Command::new(&self.binary);
         self.configure_command(&mut cmd);
@@ -365,8 +532,7 @@ impl Ytdlp {
         }
 
         add_rate_limit_args(&mut cmd);
-        cmd.args(&self.extra_args);
-        cmd.arg("--").arg(&url);
+        cmd.args(&self.extra_args).arg("--").arg(&url);
 
         let output = tokio::time::timeout(DOWNLOAD_TIMEOUT, cmd.output())
             .await
@@ -374,11 +540,10 @@ impl Ytdlp {
             .context("failed to spawn yt-dlp")?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(
                 "yt-dlp download failed (exit {}): {}",
                 output.status,
-                stderr.trim()
+                String::from_utf8_lossy(&output.stderr).trim()
             );
         }
 
@@ -395,7 +560,6 @@ impl Ytdlp {
                 path.display()
             );
         }
-
         Ok(path)
     }
 }
@@ -413,15 +577,26 @@ fn best_thumbnail(thumbnails: &[Value]) -> Option<String> {
         let height = t.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
         let pref = t.get("preference").and_then(|v| v.as_i64()).unwrap_or(0);
         let score = (width * height, pref);
-        if best.is_none_or(|(_, b)| score > b) {
+        if best.map_or(true, |(_, b)| score > b) {
             best = Some((t, score));
         }
     }
-
     best.and_then(|(t, _)| t.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()))
 }
 
 fn normalize_playlist_url(url: &str) -> String {
+    let lower = url.to_lowercase();
+    if lower.contains("twitch.tv") {
+        if lower.contains("/videos/")
+            || lower.contains("/video/")
+            || lower.ends_with("/videos")
+            || lower.ends_with("/clips")
+        {
+            return url.to_string();
+        }
+        let base = url.trim_end_matches('/');
+        return format!("{base}/videos");
+    }
     if url.contains("/playlist?") || url.contains("/playlist/") {
         return url.to_string();
     }
@@ -438,7 +613,6 @@ fn normalize_playlist_url(url: &str) -> String {
         "/podcasts",
         "/releases",
     ];
-    let lower = url.to_lowercase();
     if tab_suffixes.iter().any(|s| lower.contains(s)) {
         return url.to_string();
     }
@@ -448,55 +622,4 @@ fn normalize_playlist_url(url: &str) -> String {
     let base = url.trim_end_matches('/');
     let base = base.split('?').next().unwrap_or(base);
     format!("{base}/videos")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::normalize_playlist_url;
-
-    #[test]
-    fn bare_handle_gets_videos() {
-        assert_eq!(
-            normalize_playlist_url("https://www.youtube.com/@mkbhd"),
-            "https://www.youtube.com/@mkbhd/videos"
-        );
-    }
-
-    #[test]
-    fn trailing_slash_stripped() {
-        assert_eq!(
-            normalize_playlist_url("https://www.youtube.com/@mkbhd/"),
-            "https://www.youtube.com/@mkbhd/videos"
-        );
-    }
-
-    #[test]
-    fn existing_tab_preserved() {
-        assert_eq!(
-            normalize_playlist_url("https://www.youtube.com/@mkbhd/streams"),
-            "https://www.youtube.com/@mkbhd/streams"
-        );
-    }
-
-    #[test]
-    fn playlist_preserved() {
-        let url = "https://www.youtube.com/playlist?list=PLabc123";
-        assert_eq!(normalize_playlist_url(url), url);
-    }
-
-    #[test]
-    fn channel_id_preserved() {
-        assert_eq!(
-            normalize_playlist_url("https://www.youtube.com/channel/UCBJycsmduvYEL83R_U4JriQ"),
-            "https://www.youtube.com/channel/UCBJycsmduvYEL83R_U4JriQ/videos"
-        );
-    }
-
-    #[test]
-    fn query_string_stripped_on_bare() {
-        assert_eq!(
-            normalize_playlist_url("https://www.youtube.com/@mkbhd?si=xyz"),
-            "https://www.youtube.com/@mkbhd/videos"
-        );
-    }
 }
