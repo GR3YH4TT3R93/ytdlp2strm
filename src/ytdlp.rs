@@ -8,6 +8,21 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
 const LIST_TIMEOUT: Duration = Duration::from_secs(120);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(3600);
 
+/// Rate-limit mitigation. Applied to every yt-dlp invocation that runs as part
+/// of a bulk operation (channel enumeration, per-video metadata fetch, and
+/// download) but deliberately NOT to `stream_url`, which is called on-demand
+/// for playback and must return fast.
+fn add_rate_limit_args(cmd: &mut Command) {
+    cmd.arg("--sleep-requests")
+        .arg("1")
+        .arg("--sleep-interval")
+        .arg("2")
+        .arg("--retries")
+        .arg("5")
+        .arg("--retry-sleep")
+        .arg("10");
+}
+
 #[derive(Debug, Clone)]
 pub struct Ytdlp {
     binary: PathBuf,
@@ -65,12 +80,9 @@ impl Ytdlp {
         let mut cmd = Command::new(&self.binary);
         self.configure_command(&mut cmd);
 
-        cmd.arg("-J")
-            .arg("--no-warnings")
-            .arg("--no-playlist")
-            .args(&self.extra_args)
-            .arg("--")
-            .arg(url);
+        cmd.arg("-J").arg("--no-warnings").arg("--no-playlist");
+        add_rate_limit_args(&mut cmd);
+        cmd.args(&self.extra_args).arg("--").arg(url);
 
         let output = tokio::time::timeout(RESOLVE_TIMEOUT, cmd.output())
             .await
@@ -91,6 +103,9 @@ impl Ytdlp {
         let mut cmd = Command::new(&self.binary);
         self.configure_command(&mut cmd);
 
+        // Intentionally no rate-limit args here — this runs on-demand for
+        // playback and must be responsive. A failed call surfaces as a playback
+        // error the user can retry; a slow call stalls the video.
         cmd.arg("-g")
             .arg("-f")
             .arg(format_id)
@@ -142,10 +157,9 @@ impl Ytdlp {
             .arg("--flat-playlist")
             .arg("--playlist-end")
             .arg(limit.to_string())
-            .arg("--no-warnings")
-            .args(&self.extra_args)
-            .arg("--")
-            .arg(&normalized);
+            .arg("--no-warnings");
+        add_rate_limit_args(&mut cmd);
+        cmd.args(&self.extra_args).arg("--").arg(&normalized);
 
         let output = tokio::time::timeout(LIST_TIMEOUT, cmd.output())
             .await
@@ -252,10 +266,9 @@ impl Ytdlp {
             .arg("--ignore-errors")
             .arg("--no-warnings")
             .arg("--playlist-items")
-            .arg("0")
-            .args(&self.extra_args)
-            .arg("--")
-            .arg(channel_url);
+            .arg("0");
+        add_rate_limit_args(&mut cmd);
+        cmd.args(&self.extra_args).arg("--").arg(channel_url);
 
         let output = tokio::time::timeout(LIST_TIMEOUT, cmd.output())
             .await
@@ -320,6 +333,7 @@ impl Ytdlp {
             }
         }
 
+        add_rate_limit_args(&mut cmd);
         cmd.args(&self.extra_args);
         cmd.arg("--").arg(&url);
 

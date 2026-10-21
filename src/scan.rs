@@ -16,12 +16,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 fn emit_log(logs: Option<&Arc<Mutex<Vec<String>>>>, msg: String) {
-    if let Some(logs) = logs {
-        if let Ok(mut l) = logs.lock() {
-            l.push(msg);
-            if l.len() > 200 {
-                l.remove(0);
-            }
+    if let Some(logs) = logs
+        && let Ok(mut l) = logs.lock()
+    {
+        l.push(msg);
+        if l.len() > 200 {
+            l.remove(0);
         }
     }
 }
@@ -94,10 +94,10 @@ async fn ensure_season_folder(
 
 async fn load_anchor_date(channel_dir: &Path) -> Option<(i32, i32)> {
     let path = channel_dir.join("anchor_date.txt");
-    if let Ok(content) = tokio::fs::read_to_string(&path).await {
-        if let Some(date) = parse_date(Some(content.trim())) {
-            return Some(date);
-        }
+    if let Ok(content) = tokio::fs::read_to_string(&path).await
+        && let Some(date) = parse_date(Some(content.trim()))
+    {
+        return Some(date);
     }
     None
 }
@@ -114,24 +114,16 @@ async fn earliest_nfo_date(
 ) -> Option<(i32, i32)> {
     let mut earliest: Option<(i32, i32)> = None;
     for path in nfo_paths.values() {
-        if let Ok(content) = tokio::fs::read_to_string(path).await {
-            if let Some(start) = content.find("<aired>") {
-                if let Some(end) = content[start..].find("</aired>") {
-                    let date_str = &content[start + 7..start + end];
-                    if let Some(date) = parse_date(Some(date_str.trim())) {
-                        earliest = Some(match earliest {
-                            Some((y, m)) => {
-                                if date.0 < y || (date.0 == y && date.1 < m) {
-                                    date
-                                } else {
-                                    (y, m)
-                                }
-                            }
-                            None => date,
-                        });
-                    }
-                }
-            }
+        if let Ok(content) = tokio::fs::read_to_string(path).await
+            && let Some(start) = content.find("<aired>")
+            && let Some(end) = content[start..].find("</aired>")
+            && let Some(date) = parse_date(content.get(start + 7..start + end).map(str::trim))
+        {
+            earliest = Some(match earliest {
+                Some((y, m)) if date.0 < y || (date.0 == y && date.1 < m) => date,
+                Some((y, m)) => (y, m),
+                None => date,
+            });
         }
     }
     earliest
@@ -390,11 +382,30 @@ async fn run_scan_inner(
     let mut used_titles = HashSet::new();
 
     // -----------------------------------------------------------------------
-    // Season anchor: load persisted value, fall back to existing NFOs
+    // Season anchor: persisted file > earliest NFO, with self-heal.
+    // If the persisted anchor is newer than the earliest NFO on disk, we
+    // trust the NFOs (they're what the user sees) and rewrite the anchor.
     // -----------------------------------------------------------------------
-    let mut anchor_date: Option<(i32, i32)> = load_anchor_date(&channel_dir).await;
-    if anchor_date.is_none() {
-        anchor_date = earliest_nfo_date(&existing.nfos).await;
+    let persisted_anchor = load_anchor_date(&channel_dir).await;
+    let earliest_nfo = earliest_nfo_date(&existing.nfos).await;
+    let mut anchor_date: Option<(i32, i32)> = persisted_anchor.or(earliest_nfo);
+
+    if let (Some(anchor), Some(earliest)) = (anchor_date, earliest_nfo) {
+        let a_total = anchor.0 * 12 + anchor.1;
+        let e_total = earliest.0 * 12 + earliest.1;
+        if a_total > e_total {
+            tracing::warn!(
+                anchor = ?anchor,
+                earliest = ?earliest,
+                "persisted anchor newer than earliest NFO; correcting from library"
+            );
+            anchor_date = Some(earliest);
+        }
+    }
+    if anchor_date != persisted_anchor
+        && let Some(a) = anchor_date
+    {
+        let _ = save_anchor_date(&channel_dir, a).await;
     }
 
     let mut current_season = 1;
@@ -414,20 +425,17 @@ async fn run_scan_inner(
         let progress = total - idx;
         let video_started = Instant::now();
 
-        // 1. Try to read the date from the existing NFO
+        // 1. Try to read the date from the existing NFO (cheap, no yt-dlp call)
         let mut date = None;
         let mut cached_meta = None;
-        if !force {
-            if let Some(nfo_path) = existing.nfos.get(&entry.id) {
-                if let Ok(content) = tokio::fs::read_to_string(nfo_path).await {
-                    if let Some(start) = content.find("<aired>") {
-                        if let Some(end) = content[start..].find("</aired>") {
-                            let date_str = &content[start + 7..start + end];
-                            date = parse_date(Some(date_str));
-                        }
-                    }
-                }
-            }
+        if !force
+            && let Some(nfo_path) = existing.nfos.get(&entry.id)
+            && let Ok(content) = tokio::fs::read_to_string(nfo_path).await
+            && let Some(start) = content.find("<aired>")
+            && let Some(end) = content[start..].find("</aired>")
+        {
+            let date_str = &content[start + 7..start + end];
+            date = parse_date(Some(date_str));
         }
 
         // 2. If we couldn't get the date, call yt-dlp
@@ -437,7 +445,7 @@ async fn run_scan_inner(
             cached_meta = Some(meta);
         }
 
-        // 3. Establish / persist anchor if still missing
+        // 3. Anchor fallback: only if we truly have nothing (fresh channel)
         if anchor_date.is_none() {
             anchor_date = date;
             if let Some(a) = anchor_date {
@@ -460,7 +468,6 @@ async fn run_scan_inner(
         let episode = episode_in_season;
         episode_in_season += 1;
 
-        // Create season folder + season.nfo on first use
         let season_dir = ensure_season_folder(&channel_dir, season, force, &mut seasons_written)
             .await
             .with_context(|| format!("ensure season folder for S{season}"))?;
@@ -564,46 +571,66 @@ async fn run_scan_inner(
         }
 
         // ---------------- Episode NFO ----------------
+        // IMPORTANT: never write an NFO when we couldn't get a date.
+        // A date-less NFO produces a wrong season and, worse, prevents the
+        // next scan from recomputing the correct one (because the NFO
+        // looks "fresh" by thumb match). Skip, record, retry next scan.
         if cfg.metadata.write_nfo {
-            let new_nfo_path = season_dir.join(format!("{safe_title}.nfo"));
-            let nfo_in_place = existing
-                .nfos
-                .get(&entry.id)
-                .map(|p| path_in_dir(p, &season_dir))
-                .unwrap_or(false);
-
-            let nfo_fresh = if force || thumb_changed || !nfo_in_place {
-                false
-            } else if let Some(existing_nfo) = existing.nfos.get(&entry.id) {
-                nfo_thumb_matches(existing_nfo, thumb_filename.as_deref()).await
+            if date.is_none() {
+                tracing::warn!(
+                    video_id = %entry.id,
+                    "skipping NFO: upload date unavailable (rate limited?)"
+                );
+                failures.push(format!(
+                    "nfo {}: upload date unavailable (rate limited?)",
+                    entry.id
+                ));
             } else {
-                false
-            };
+                let new_nfo_path = season_dir.join(format!("{safe_title}.nfo"));
+                let nfo_in_place = existing
+                    .nfos
+                    .get(&entry.id)
+                    .map(|p| path_in_dir(p, &season_dir))
+                    .unwrap_or(false);
 
-            if nfo_fresh {
-                nfo_skipped += 1;
-            } else {
-                if let Some(old_path) = existing.nfos.get(&entry.id) {
-                    if old_path != &new_nfo_path {
-                        let _ = tokio::fs::remove_file(old_path).await;
-                    }
-                }
-                let meta = match cached_meta {
-                    Some(m) => m,
-                    None => get_video_metadata(state, entry).await,
+                let nfo_fresh = if force || thumb_changed || !nfo_in_place {
+                    false
+                } else if let Some(existing_nfo) = existing.nfos.get(&entry.id) {
+                    nfo_thumb_matches(existing_nfo, thumb_filename.as_deref()).await
+                } else {
+                    false
                 };
-                let nfo_content =
-                    build_episode_nfo(&meta, season, episode, &entry.id, thumb_filename.as_deref());
-                match tokio::fs::write(&new_nfo_path, nfo_content).await {
-                    Ok(_) => {
-                        nfo_written += 1;
-                        state
-                            .metrics
-                            .nfo_files_written
-                            .fetch_add(1, Ordering::Relaxed);
+
+                if nfo_fresh {
+                    nfo_skipped += 1;
+                } else {
+                    if let Some(old_path) = existing.nfos.get(&entry.id) {
+                        if old_path != &new_nfo_path {
+                            let _ = tokio::fs::remove_file(old_path).await;
+                        }
                     }
-                    Err(e) => {
-                        failures.push(format!("nfo {}: {e}", entry.id));
+                    let meta = match cached_meta {
+                        Some(m) => m,
+                        None => get_video_metadata(state, entry).await,
+                    };
+                    let nfo_content = build_episode_nfo(
+                        &meta,
+                        season,
+                        episode,
+                        &entry.id,
+                        thumb_filename.as_deref(),
+                    );
+                    match tokio::fs::write(&new_nfo_path, nfo_content).await {
+                        Ok(_) => {
+                            nfo_written += 1;
+                            state
+                                .metrics
+                                .nfo_files_written
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            failures.push(format!("nfo {}: {e}", entry.id));
+                        }
                     }
                 }
             }
@@ -629,9 +656,11 @@ async fn run_scan_inner(
         emit_log(logs, msg);
     }
 
-    // Orphan cleanup — ONLY run when the scan clearly covered the whole channel.
-    // If we hit the limit, the batch may have truncated the channel, and deleting
-    // "missing" files would wipe the library. This is the bug that ate everything.
+    // ---------------- Orphan cleanup (guarded) ----------------
+    // If the scan hit the limit, the batch may be a truncated view of the
+    // channel; deleting "missing" files would wipe the library. Only run
+    // cleanup when yt-dlp returned fewer entries than we asked for, which
+    // proves we saw the whole channel.
     let channel_fully_scanned = total < limit;
     if channel_fully_scanned {
         let new_ids: HashSet<String> = unique_entries.iter().map(|e| e.id.clone()).collect();
