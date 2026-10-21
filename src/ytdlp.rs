@@ -202,8 +202,13 @@ impl Ytdlp {
                 .and_then(|arr| best_thumbnail(arr));
         }
 
-        // 5. Use the playlist title if it's a playlist, otherwise fall back to channel name
-        let name = if typ == "playlist" {
+        // Only use the JSON `title` for USER playlists (URLs with /playlist?list=...).
+        // Channel tab URLs (/@handle/videos, /channel/UCxxx/streams, ...) also report
+        // _type="playlist", but their `title` is "<Channel> - Videos" — using it
+        // would create folders named "Channel - Videos" instead of the channel name.
+        let is_user_playlist =
+            channel_url.contains("/playlist?") || channel_url.contains("/playlist/");
+        let name = if is_user_playlist {
             json.get("title")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Unknown")

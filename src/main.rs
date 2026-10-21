@@ -1,5 +1,6 @@
 mod auth;
 mod bridge;
+mod cli;
 mod config;
 mod deps;
 mod downloads;
@@ -30,17 +31,11 @@ use directories::ProjectDirs;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
+use crate::cli::Cli;
 use crate::config::AppConfig;
 use crate::sponsorblock::SponsorBlock;
 use crate::state::{AppState, Metrics, PlaylistCache, ResolveCache};
 use crate::ytdlp::Ytdlp;
-
-#[derive(Parser, Debug)]
-#[command(version, about = "yt-dlp to STRM bridge server")]
-struct Cli {
-    #[arg(short, long)]
-    config: Option<PathBuf>,
-}
 
 fn resolve_paths(cli_config: Option<PathBuf>) -> (PathBuf, PathBuf) {
     if let Some(p) = cli_config {
@@ -94,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let (config_path, data_dir) = resolve_paths(cli.config);
+    let (config_path, data_dir) = resolve_paths(cli.config.clone());
 
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         eprintln!(
@@ -199,6 +194,13 @@ async fn main() -> anyhow::Result<()> {
         scan_running: Arc::new(Mutex::new(false)),
         scan_cancel: Arc::new(AtomicBool::new(false)),
     };
+
+    // --- CLI SCAN MODE INTERCEPT ---
+    // If a scan command was provided, this runs it and returns true,
+    // causing us to exit before starting the web server.
+    if cli::handle_scan_commands(&state, &cli).await {
+        return Ok(());
+    }
 
     if let Err(e) = downloads::cleanup_old(&state).await {
         tracing::warn!(error = %e, "startup download cleanup failed");
