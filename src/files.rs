@@ -44,7 +44,7 @@ pub async fn scan_existing_files(dir: &Path) -> ExistingFiles {
     // Walk the channel root AND every subdirectory (Season folders).
     let mut stack = vec![dir.to_path_buf()];
     while let Some(current) = stack.pop() {
-        let Ok(mut rd) = fs::read_dir(&current).await else {
+        let Ok(mut rd) = tokio::fs::read_dir(&current).await else {
             continue;
         };
         while let Ok(Some(entry)) = rd.next_entry().await {
@@ -74,7 +74,7 @@ pub async fn scan_existing_files(dir: &Path) -> ExistingFiles {
             }
 
             if let Some(stem) = name.strip_suffix(".strm")
-                && let Ok(content) = fs::read_to_string(&path).await
+                && let Ok(content) = tokio::fs::read_to_string(&path).await
                 && let Some(id) = content.trim().split('/').next_back()
                 && !id.is_empty()
             {

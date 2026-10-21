@@ -32,10 +32,10 @@ impl StreamKind {
                     is_hls(f)
                         && f.get("vcodec")
                             .and_then(|v| v.as_str())
-                            .map_or(false, |v| v != "none")
+                            .is_some_and(|v| v != "none")
                         && f.get("acodec")
                             .and_then(|v| v.as_str())
-                            .map_or(true, |a| a == "none")
+                            .is_none_or(|a| a == "none")
                 }
                 StreamKind::Audio => {
                     is_hls(f) && f.get("vcodec").and_then(|v| v.as_str()) == Some("none")
@@ -49,7 +49,7 @@ impl StreamKind {
                 let is_vp9 = f
                     .get("vcodec")
                     .and_then(|v| v.as_str())
-                    .map_or(false, |v| v.starts_with("vp09")) as u64;
+                    .is_some_and(|v| v.starts_with("vp09")) as u64;
                 (h, is_vp9)
             }
             StreamKind::Audio => {
@@ -58,7 +58,7 @@ impl StreamKind {
                 let is_opus =
                     f.get("format_id")
                         .and_then(|v| v.as_str())
-                        .map_or(false, |id| id == "251" || id == "233") as u64;
+                        .is_some_and(|id| id == "251" || id == "233") as u64;
                 (is_opus, abr)
             }
         });
@@ -70,7 +70,7 @@ impl StreamKind {
 fn is_hls(f: &Value) -> bool {
     f.get("protocol")
         .and_then(|v| v.as_str())
-        .map_or(false, |p| p.contains("m3u8"))
+        .is_some_and(|p| p.contains("m3u8"))
         && f.get("manifest_url").and_then(|v| v.as_str()).is_some()
 }
 
@@ -358,11 +358,10 @@ pub async fn bridge_segment(
         .header(reqwest::header::REFERER, "https://www.youtube.com/")
         .header(reqwest::header::ORIGIN, "https://www.youtube.com");
 
-    if let Some(range) = headers.get(header::RANGE) {
-        if let Ok(range_str) = range.to_str() {
+    if let Some(range) = headers.get(header::RANGE)
+        && let Ok(range_str) = range.to_str() {
             req = req.header(reqwest::header::RANGE, range_str);
         }
-    }
 
     let resp = match req.send().await {
         Ok(r) => r,
@@ -405,11 +404,10 @@ pub async fn bridge_segment(
         reqwest::header::CONTENT_RANGE,
         reqwest::header::ACCEPT_RANGES,
     ] {
-        if let Some(v) = resp.headers().get(&h) {
-            if let Ok(v) = v.to_str() {
+        if let Some(v) = resp.headers().get(&h)
+            && let Ok(v) = v.to_str() {
                 builder = builder.header(h.as_str(), v);
             }
-        }
     }
 
     Ok(builder

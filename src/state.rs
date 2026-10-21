@@ -27,11 +27,10 @@ impl ResolveCache {
     pub async fn get_or_resolve(&self, ytdlp: &Ytdlp, video_id: &str) -> anyhow::Result<Value> {
         {
             let cache = self.0.lock().unwrap();
-            if let Some((json, ts)) = cache.get(video_id) {
-                if ts.elapsed() < RESOLVE_TTL {
+            if let Some((json, ts)) = cache.get(video_id)
+                && ts.elapsed() < RESOLVE_TTL {
                     return Ok(json.clone());
                 }
-            }
         }
         let url = format!("https://www.youtube.com/watch?v={video_id}");
         let json = ytdlp.resolve(&url).await?;
@@ -59,11 +58,10 @@ impl PlaylistCache {
 
     pub fn get(&self, key: &str) -> Option<String> {
         let cache = self.0.lock().unwrap();
-        if let Some((val, ts)) = cache.get(key) {
-            if ts.elapsed() < Duration::from_secs(7200) {
+        if let Some((val, ts)) = cache.get(key)
+            && ts.elapsed() < Duration::from_secs(7200) {
                 return Some(val.clone());
             }
-        }
         None
     }
 

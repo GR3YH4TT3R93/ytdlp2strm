@@ -109,33 +109,52 @@ pub async fn handle_scan_commands(state: &AppState, cli: &Cli) -> bool {
 
 async fn run_single_scan(state: &AppState, url: &str, force: bool, limit: usize) {
     let mode = state.config().strm.mode;
+    let started = std::time::Instant::now();
 
     let result = scan::run_scan(state, url, limit, force, mode, None).await;
 
     match result {
         Ok(res) => {
-            println!("\n=== Scan Complete ===");
-            println!("Channel:  {}", res.channel);
-            println!("Total:    {}", res.total);
+            let elapsed = started.elapsed().as_secs();
+            println!("\n╭────────────────────────────────────────────────────────╮");
+            println!("│ Scan Complete: {:<40} │", truncate(&res.channel, 40));
+            println!("├────────────────────────────────────────────────────────┤");
+            println!("│ Total Videos Scanned : {:<30} │", res.total);
             println!(
-                "STRMs:    {} written, {} skipped",
+                "│ STRMs                : {:<3} written / {:<3} skipped     │",
                 res.strm_written, res.strm_skipped
             );
             println!(
-                "NFOs:     {} written, {} skipped",
+                "│ NFOs                 : {:<3} written / {:<3} skipped     │",
                 res.nfo_written, res.nfo_skipped
             );
             println!(
-                "Thumbs:   {} written, {} skipped",
+                "│ Thumbnails           : {:<3} written / {:<3} skipped     │",
                 res.thumb_written, res.thumb_skipped
             );
+            println!(
+                "│ Time Elapsed         : {:<30} │",
+                format!("{}m {}s", elapsed / 60, elapsed % 60)
+            );
+
             if !res.failures.is_empty() {
-                println!("Failures: {}", res.failures.len());
+                println!("├────────────────────────────────────────────────────────┤");
+                println!("│ ⚠️  Failures          : {:<30} │", res.failures.len());
                 for f in &res.failures {
-                    println!("  - {}", f);
+                    println!("│   - {:<50} │", truncate(f, 50));
                 }
             }
+            println!("╰────────────────────────────────────────────────────────╯");
         }
-        Err(e) => eprintln!("Scan failed: {:#}", e),
+        Err(e) => eprintln!("\n❌ Scan failed: {:#}", e),
+    }
+}
+
+// Helper to keep the box aligned
+fn truncate(s: &str, max_len: usize) -> String {
+    if s.len() > max_len {
+        format!("{}...", &s[..max_len - 3])
+    } else {
+        s.to_string()
     }
 }

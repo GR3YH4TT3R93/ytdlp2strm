@@ -49,14 +49,13 @@ pub async fn fetch_media_playlist(
 fn extract_map_uri(raw: &str) -> Option<String> {
     for line in raw.lines() {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("#EXT-X-MAP:") {
-            if let Some(start) = rest.find("URI=\"") {
+        if let Some(rest) = line.strip_prefix("#EXT-X-MAP:")
+            && let Some(start) = rest.find("URI=\"") {
                 let after = &rest[start + "URI=\"".len()..];
                 if let Some(end) = after.find('"') {
                     return Some(after[..end].to_string());
                 }
             }
-        }
     }
     None
 }

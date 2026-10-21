@@ -16,6 +16,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 fn emit_log(logs: Option<&Arc<Mutex<Vec<String>>>>, msg: String) {
+    // Always print to stderr so CLI users see progress in real time
+    eprintln!("{msg}");
+
+    // Additionally buffer for the web UI if a buffer was provided
     if let Some(logs) = logs
         && let Ok(mut l) = logs.lock()
     {
@@ -445,17 +449,39 @@ async fn run_scan_inner(
             cached_meta = Some(meta);
         }
 
-        // 3. Anchor fallback: only if we truly have nothing (fresh channel)
+        // Bail immediately if we still don't have a date. Continuing would
+        // write an NFO with no <aired> tag (silent data loss) or compute a
+        // wrong season. This surfaces rate limits, age restrictions, and
+        // missing JS runtimes as hard errors instead of skipped files.
+        let date = date.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no upload date for video {} ({}); possible rate limit, \
+         age restriction, or missing JS runtime. Aborting scan.",
+                entry.id,
+                entry.title
+            )
+        })?;
+
+        // 3. Establish / persist anchor if still missing
         if anchor_date.is_none() {
-            anchor_date = date;
+            anchor_date = Some(date);
             if let Some(a) = anchor_date {
                 let _ = save_anchor_date(&channel_dir, a).await;
             }
         }
 
+        if let Some(anchor) = anchor_date {
+            let months = (date.0 - anchor.0) * 12 + (date.1 - anchor.1);
+            let target_season = (months / 6).max(0) as u32 + 1;
+            if target_season > current_season {
+                current_season = target_season;
+                episode_in_season = 1;
+            }
+        }
+
         let mut target_season = current_season;
-        if let (Some(anchor), Some(curr)) = (anchor_date, date) {
-            let months = (curr.0 - anchor.0) * 12 + (curr.1 - anchor.1);
+        if let Some(anchor) = anchor_date {
+            let months = (date.0 - anchor.0) * 12 + (date.1 - anchor.1);
             target_season = (months / 6).max(0) as u32 + 1;
         }
 
@@ -505,10 +531,10 @@ async fn run_scan_inner(
         if strm_fresh {
             strm_skipped += 1;
         } else {
-            if let Some(old_path) = existing.strms.get(&entry.id) {
-                if old_path != &new_strm_path {
-                    let _ = tokio::fs::remove_file(old_path).await;
-                }
+            if let Some(old_path) = existing.strms.get(&entry.id)
+                && old_path != &new_strm_path
+            {
+                let _ = tokio::fs::remove_file(old_path).await;
             }
             match write_strm_file(&season_dir, &entry.id, &entry.title, &play_url, force).await {
                 Ok(outcome) => {
@@ -556,10 +582,10 @@ async fn run_scan_inner(
                             .metrics
                             .thumbnails_written
                             .fetch_add(1, Ordering::Relaxed);
-                        if let Some(old) = &old_thumb {
-                            if old != &final_path {
-                                let _ = tokio::fs::remove_file(old).await;
-                            }
+                        if let Some(old) = &old_thumb
+                            && old != &final_path
+                        {
+                            let _ = tokio::fs::remove_file(old).await;
                         }
                         cleanup_image_variants(&base_path, &final_path).await;
                     }
@@ -571,66 +597,49 @@ async fn run_scan_inner(
         }
 
         // ---------------- Episode NFO ----------------
-        // IMPORTANT: never write an NFO when we couldn't get a date.
-        // A date-less NFO produces a wrong season and, worse, prevents the
-        // next scan from recomputing the correct one (because the NFO
-        // looks "fresh" by thumb match). Skip, record, retry next scan.
+        // `date` is guaranteed to be Some here — we bail earlier in the loop
+        // if the metadata fetch returns no upload_date, so no NFO ever lands
+        // on disk without a valid <aired> tag.
         if cfg.metadata.write_nfo {
-            if date.is_none() {
-                tracing::warn!(
-                    video_id = %entry.id,
-                    "skipping NFO: upload date unavailable (rate limited?)"
-                );
-                failures.push(format!(
-                    "nfo {}: upload date unavailable (rate limited?)",
-                    entry.id
-                ));
+            let new_nfo_path = season_dir.join(format!("{safe_title}.nfo"));
+            let nfo_in_place = existing
+                .nfos
+                .get(&entry.id)
+                .map(|p| path_in_dir(p, &season_dir))
+                .unwrap_or(false);
+
+            let nfo_fresh = if force || thumb_changed || !nfo_in_place {
+                false
+            } else if let Some(existing_nfo) = existing.nfos.get(&entry.id) {
+                nfo_thumb_matches(existing_nfo, thumb_filename.as_deref()).await
             } else {
-                let new_nfo_path = season_dir.join(format!("{safe_title}.nfo"));
-                let nfo_in_place = existing
-                    .nfos
-                    .get(&entry.id)
-                    .map(|p| path_in_dir(p, &season_dir))
-                    .unwrap_or(false);
+                false
+            };
 
-                let nfo_fresh = if force || thumb_changed || !nfo_in_place {
-                    false
-                } else if let Some(existing_nfo) = existing.nfos.get(&entry.id) {
-                    nfo_thumb_matches(existing_nfo, thumb_filename.as_deref()).await
-                } else {
-                    false
+            if nfo_fresh {
+                nfo_skipped += 1;
+            } else {
+                if let Some(old_path) = existing.nfos.get(&entry.id)
+                    && old_path != &new_nfo_path
+                {
+                    let _ = tokio::fs::remove_file(old_path).await;
+                }
+                let meta = match cached_meta {
+                    Some(m) => m,
+                    None => get_video_metadata(state, entry).await,
                 };
-
-                if nfo_fresh {
-                    nfo_skipped += 1;
-                } else {
-                    if let Some(old_path) = existing.nfos.get(&entry.id) {
-                        if old_path != &new_nfo_path {
-                            let _ = tokio::fs::remove_file(old_path).await;
-                        }
+                let nfo_content =
+                    build_episode_nfo(&meta, season, episode, &entry.id, thumb_filename.as_deref());
+                match tokio::fs::write(&new_nfo_path, nfo_content).await {
+                    Ok(_) => {
+                        nfo_written += 1;
+                        state
+                            .metrics
+                            .nfo_files_written
+                            .fetch_add(1, Ordering::Relaxed);
                     }
-                    let meta = match cached_meta {
-                        Some(m) => m,
-                        None => get_video_metadata(state, entry).await,
-                    };
-                    let nfo_content = build_episode_nfo(
-                        &meta,
-                        season,
-                        episode,
-                        &entry.id,
-                        thumb_filename.as_deref(),
-                    );
-                    match tokio::fs::write(&new_nfo_path, nfo_content).await {
-                        Ok(_) => {
-                            nfo_written += 1;
-                            state
-                                .metrics
-                                .nfo_files_written
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
-                        Err(e) => {
-                            failures.push(format!("nfo {}: {e}", entry.id));
-                        }
+                    Err(e) => {
+                        failures.push(format!("nfo {}: {e}", entry.id));
                     }
                 }
             }
@@ -708,11 +717,11 @@ async fn run_scan_inner(
             let mut has_media = false;
             if let Ok(mut sub) = tokio::fs::read_dir(entry.path()).await {
                 while let Ok(Some(sf)) = sub.next_entry().await {
-                    if let Some(fname) = sf.file_name().to_str() {
-                        if fname != "season.nfo" {
-                            has_media = true;
-                            break;
-                        }
+                    if let Some(fname) = sf.file_name().to_str()
+                        && fname != "season.nfo"
+                    {
+                        has_media = true;
+                        break;
                     }
                 }
             }

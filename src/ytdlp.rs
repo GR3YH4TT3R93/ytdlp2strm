@@ -413,7 +413,7 @@ fn best_thumbnail(thumbnails: &[Value]) -> Option<String> {
         let height = t.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
         let pref = t.get("preference").and_then(|v| v.as_i64()).unwrap_or(0);
         let score = (width * height, pref);
-        if best.map_or(true, |(_, b)| score > b) {
+        if best.is_none_or(|(_, b)| score > b) {
             best = Some((t, score));
         }
     }

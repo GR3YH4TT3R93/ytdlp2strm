@@ -5,12 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use url::Url;
 
+type SegmentCache = Arc<Mutex<HashMap<String, (Vec<Segment>, Instant)>>>;
+
 #[derive(Debug, Clone)]
 pub struct SponsorBlock {
     client: reqwest::Client,
     api_base: String,
     categories: Vec<String>,
-    cache: Arc<Mutex<HashMap<String, (Vec<Segment>, Instant)>>>,
+    cache: SegmentCache,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,10 +69,10 @@ impl SponsorBlock {
 
         {
             let cache = self.cache.lock().unwrap();
-            if let Some((segments, ts)) = cache.get(video_id) {
-                if ts.elapsed() < Duration::from_secs(86400) {
-                    return Ok(segments.clone());
-                }
+            if let Some((segments, ts)) = cache.get(video_id)
+                && ts.elapsed() < Duration::from_secs(86400)
+            {
+                return Ok(segments.clone());
             }
         }
 

@@ -372,8 +372,8 @@ pub async fn strm_generate(
 
     let mut thumb_filename: Option<String> = None;
     let mut thumb_path: Option<std::path::PathBuf> = None;
-    if state.config().metadata.write_thumbnails {
-        if let Some(url) = json.get("thumbnail").and_then(|v| v.as_str()) {
+    if state.config().metadata.write_thumbnails
+        && let Some(url) = json.get("thumbnail").and_then(|v| v.as_str()) {
             let base_path = dir.join(format!("{safe_title}-thumb"));
             match download_image(&state.http, url, &base_path).await {
                 Ok(p) => {
@@ -390,7 +390,6 @@ pub async fn strm_generate(
                 }
             }
         }
-    }
 
     let mut nfo_path: Option<std::path::PathBuf> = None;
     if state.config().metadata.write_nfo {

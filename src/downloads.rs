@@ -44,11 +44,10 @@ async fn find_downloaded(state: &AppState, video_id: &str) -> Option<PathBuf> {
             continue;
         }
         let path = entry.path();
-        if let Ok(meta) = entry.metadata().await {
-            if meta.is_file() && meta.len() > 0 {
+        if let Ok(meta) = entry.metadata().await
+            && meta.is_file() && meta.len() > 0 {
                 return Some(path);
             }
-        }
     }
     None
 }
@@ -69,11 +68,10 @@ where
         f.await
     };
     let mut locks = state.video_locks.lock().unwrap();
-    if let Some(existing) = locks.get(video_id) {
-        if Arc::strong_count(existing) <= 2 {
+    if let Some(existing) = locks.get(video_id)
+        && Arc::strong_count(existing) <= 2 {
             locks.remove(video_id);
         }
-    }
     result
 }
 
@@ -211,8 +209,8 @@ async fn serve_file(path: &Path, headers: &HeaderMap) -> anyhow::Result<Response
 
     let disposition = format!("inline; filename=\"{filename}\"");
 
-    if let Some(range_str) = headers.get(header::RANGE).and_then(|v| v.to_str().ok()) {
-        if let Some((start, end)) = parse_range(range_str, size) {
+    if let Some(range_str) = headers.get(header::RANGE).and_then(|v| v.to_str().ok())
+        && let Some((start, end)) = parse_range(range_str, size) {
             let len = end - start + 1;
             let mut file = tokio::fs::File::open(path).await?;
             file.seek(SeekFrom::Start(start)).await?;
@@ -226,7 +224,6 @@ async fn serve_file(path: &Path, headers: &HeaderMap) -> anyhow::Result<Response
                 .header(header::CONTENT_DISPOSITION, disposition)
                 .body(Body::from_stream(stream))?);
         }
-    }
 
     let file = tokio::fs::File::open(path).await?;
     let stream = ReaderStream::new(file);
@@ -319,12 +316,11 @@ pub async fn stats(state: &AppState) -> HashMap<String, u64> {
     let mut bytes = 0u64;
     if let Ok(mut rd) = tokio::fs::read_dir(dir).await {
         while let Ok(Some(e)) = rd.next_entry().await {
-            if let Ok(m) = e.metadata().await {
-                if m.is_file() {
+            if let Ok(m) = e.metadata().await
+                && m.is_file() {
                     count += 1;
                     bytes += m.len();
                 }
-            }
         }
     }
     out.insert("files".to_string(), count);
