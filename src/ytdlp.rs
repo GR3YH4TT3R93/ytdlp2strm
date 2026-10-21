@@ -216,8 +216,8 @@ impl Ytdlp {
             .send()
             .await;
 
-        if let Ok(resp) = resp {
-            if let Ok(json) = resp.json::<Value>().await {
+        if let Ok(resp) = resp
+            && let Ok(json) = resp.json::<Value>().await {
                 let user = &json[0]["data"]["userOrError"];
 
                 let mut avatar = user["profileImageURL"].as_str().map(|s| s.to_string());
@@ -227,15 +227,13 @@ impl Ytdlp {
                     avatar = Some(a.replace("70x70", "600x600").replace("300x300", "600x600"));
                 }
 
-                if let Some(b) = &banner {
-                    if b.contains("no_banner") {
+                if let Some(b) = &banner
+                    && b.contains("no_banner") {
                         banner = None;
                     }
-                }
 
                 return Ok((avatar, banner));
             }
-        }
 
         Ok((None, None))
     }
@@ -345,8 +343,8 @@ impl Ytdlp {
                         .map(|s| s.to_string())
                 });
 
-            if thumbnail_url.is_none() && is_twitch {
-                if let Some(first_entry) = json
+            if thumbnail_url.is_none() && is_twitch
+                && let Some(first_entry) = json
                     .get("entries")
                     .and_then(|v| v.as_array())
                     .and_then(|a| a.first())
@@ -362,7 +360,6 @@ impl Ytdlp {
                                 .map(|s| s.to_string())
                         });
                 }
-            }
         }
 
         let channel_id = json
@@ -403,11 +400,10 @@ impl Ytdlp {
                                     .map(|s| s.to_string())
                             });
 
-                        if let Some(t) = &thumbnail_url {
-                            if t.contains("thumb0-320x180.jpg") {
+                        if let Some(t) = &thumbnail_url
+                            && t.contains("thumb0-320x180.jpg") {
                                 thumbnail_url = Some(t.replace("320x180", "1280x720"));
                             }
-                        }
 
                         let duration_secs = e.get("duration").and_then(|v| v.as_u64());
 
@@ -584,7 +580,7 @@ fn best_thumbnail(thumbnails: &[Value]) -> Option<String> {
         let height = t.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
         let pref = t.get("preference").and_then(|v| v.as_i64()).unwrap_or(0);
         let score = (width * height, pref);
-        if best.map_or(true, |(_, b)| score > b) {
+        if best.is_none_or(|(_, b)| score > b) {
             best = Some((t, score));
         }
     }

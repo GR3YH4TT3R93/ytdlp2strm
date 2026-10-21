@@ -25,6 +25,7 @@ impl StreamKind {
     fn best<'a>(&self, json: &'a Value, is_twitch: bool) -> Option<&'a Value> {
         let formats = json.get("formats")?.as_array()?;
 
+        // 1. FILTER: This only returns TRUE or FALSE to decide which streams are valid
         let mut candidates: Vec<&Value> = formats
             .iter()
             .filter(|f| match self {
@@ -44,6 +45,7 @@ impl StreamKind {
             })
             .collect();
 
+        // 2. SORT: This returns the tuple to prioritize HEVC/EAC3 first
         candidates.sort_by_key(|f| match self {
             StreamKind::Video => {
                 let h = f.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -51,14 +53,41 @@ impl StreamKind {
                 let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("");
 
                 let is_video_only = (acodec == "none") as u64;
+
+                // Priority: HEVC (2) > H.264 (1) > Others (0)
+                let is_hevc = (vcodec.starts_with("hev") || vcodec.starts_with("hvc")) as u64;
                 let is_h264 = vcodec.starts_with("avc") as u64;
-                (is_video_only, is_h264, h)
+                let codec_priority = if is_hevc == 1 {
+                    2
+                } else if is_h264 == 1 {
+                    1
+                } else {
+                    0
+                };
+
+                (is_video_only, codec_priority, h)
             }
             StreamKind::Audio => {
                 let fid = f.get("format_id").and_then(|v| v.as_str()).unwrap_or("");
                 let abr = f.get("abr").and_then(|v| v.as_f64()).unwrap_or(0.0) as u64;
-                let is_aac = (fid.starts_with("140") || fid == "234") as u64;
-                (is_aac, abr, 0)
+                let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("");
+
+                // Priority: EAC3 (4) > Opus (3) > AAC (2) > Others (1)
+                let is_eac3 = (acodec.starts_with("eac3") || acodec.starts_with("ec-3")) as u64;
+                let is_opus = (acodec.starts_with("opus") || fid == "251" || fid == "233") as u64;
+                let is_aac = (acodec.starts_with("mp4a") || fid == "140" || fid == "234") as u64;
+
+                let codec_priority = if is_eac3 == 1 {
+                    4
+                } else if is_opus == 1 {
+                    3
+                } else if is_aac == 1 {
+                    2
+                } else {
+                    1
+                };
+
+                (codec_priority, abr, 0)
             }
         });
 
@@ -78,8 +107,26 @@ impl StreamKind {
         tracks.sort_by_key(|f| {
             let fid = f.get("format_id").and_then(|v| v.as_str()).unwrap_or("");
             let abr = f.get("abr").and_then(|v| v.as_f64()).unwrap_or(0.0) as u64;
-            let is_aac = (fid.starts_with("140") || fid == "234") as u64;
-            (is_aac, abr)
+            let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("");
+
+            let is_eac3 = (acodec.starts_with("eac3")
+                || acodec.starts_with("ec-3")
+                || fid.contains("eac3")) as u64;
+            let is_opus = (acodec.starts_with("opus") || fid == "251" || fid == "233") as u64;
+            let is_aac =
+                (acodec.starts_with("mp4a") || fid.starts_with("140") || fid == "234") as u64;
+
+            let codec_priority = if is_eac3 == 1 {
+                4
+            } else if is_opus == 1 {
+                3
+            } else if is_aac == 1 {
+                2
+            } else {
+                1
+            };
+
+            (codec_priority, abr)
         });
         tracks.reverse();
 
@@ -250,12 +297,15 @@ async fn build_master_body(
         .unwrap_or("none");
     let is_muxed = acodec != "none";
 
+    // Cap the reported bandwidth at 15 Mbps.
+    // If YouTube reports an insane bitrate (e.g., 200 Mbps), Jellyfin will
+    // force a transcode. By capping it, we tell Jellyfin "this is totally safe to Direct Play".
     let bandwidth = video_fmt
         .get("tbr")
         .and_then(|x| x.as_f64())
         .map(|tbr| (tbr * 1000.0) as u64)
-        .filter(|b| *b > 0)
-        .unwrap_or(5_000_000);
+        .filter(|b| *b > 0 && *b < 20_000_000) // Ignore insane bitrates
+        .unwrap_or(55_000_000); // Default to 55 Mbps
     let resolution = if width > 0 && height > 0 {
         format!(",RESOLUTION={width}x{height}")
     } else {
@@ -316,8 +366,18 @@ async fn build_master_body(
             };
 
             let is_default = if i == 0 { "YES" } else { "NO" };
+
+            // Map the codec correctly so Jellyfin knows exactly what it's getting
+            let is_eac3 = fmt_id.contains("eac3") || fmt_id.contains("ec-3");
             let is_opus = fmt_id == "251" || fmt_id == "233" || fmt_id.contains("opus");
-            let track_codec = if is_opus { "opus" } else { "mp4a.40.2" };
+
+            let track_codec = if is_eac3 {
+                "ec-3"
+            } else if is_opus {
+                "opus"
+            } else {
+                "mp4a.40.2"
+            };
 
             if i == 0 {
                 default_audio_codec = track_codec;
@@ -359,9 +419,23 @@ async fn build_master_body(
 
         let mut codec_parts = Vec::new();
         if !vcodec.is_empty() {
+            // YouTube already provides the exact RFC 6381 codec string (e.g., avc1.640028 or hvc1.1.6.L120.90).
+            // We must pass it exactly as-is so Jellyfin knows the exact profile.
             codec_parts.push(vcodec);
         }
-        codec_parts.push(default_audio_codec);
+
+        // Map the audio codec to a valid HLS string
+        let audio_codec = if default_audio_codec.starts_with("mp4a") {
+            "mp4a.40.2"
+        } else if default_audio_codec.starts_with("opus") {
+            "opus"
+        } else if default_audio_codec.starts_with("ec-3") {
+            "ec-3"
+        } else {
+            "mp4a.40.2" // fallback
+        };
+        codec_parts.push(audio_codec);
+
         let codecs = format!(",CODECS=\"{}\"", codec_parts.join(","));
 
         format!(

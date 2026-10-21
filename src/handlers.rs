@@ -394,7 +394,7 @@ pub async fn strm_generate(
 
     let mut nfo_path: Option<std::path::PathBuf> = None;
     if state.config().metadata.write_nfo {
-        let nfo_content = build_episode_nfo(&meta, 1, 1, &video_id, thumb_filename.as_deref());
+        let nfo_content = build_episode_nfo(&meta, 1, 1, &video_id, thumb_filename.as_deref(), &[]);
         let path = dir.join(format!("{safe_title}.nfo"));
         tokio::fs::write(&path, nfo_content)
             .await
