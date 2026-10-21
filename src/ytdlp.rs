@@ -195,17 +195,37 @@ impl Ytdlp {
             .unwrap_or(channel_url)
             .trim_end_matches('/');
 
+        // FIX: Use /about to force the twitch:channel extractor, otherwise yt-dlp
+        // treats the URL as a stream and fails if it's offline.
+        let about_url = format!("{}/about", base_url);
+
         let mut cmd = Command::new(&self.binary);
         self.configure_command(&mut cmd);
 
         cmd.arg("-J").arg("--no-warnings").arg("--no-playlist");
         add_rate_limit_args(&mut cmd);
-        cmd.args(&self.extra_args).arg("--").arg(base_url);
+        cmd.args(&self.extra_args).arg("--").arg(&about_url);
 
         let output = tokio::time::timeout(LIST_TIMEOUT, cmd.output())
             .await
             .context("yt-dlp avatar fetch timed out")?
             .context("failed to spawn yt-dlp")?;
+
+        // Fallback to base URL just in case the channel is currently live
+        let output = if !output.status.success() {
+            let mut cmd2 = Command::new(&self.binary);
+            self.configure_command(&mut cmd2);
+            cmd2.arg("-J").arg("--no-warnings").arg("--no-playlist");
+            add_rate_limit_args(&mut cmd2);
+            cmd2.args(&self.extra_args).arg("--").arg(&base_url);
+
+            tokio::time::timeout(LIST_TIMEOUT, cmd2.output())
+                .await
+                .context("yt-dlp avatar fallback fetch timed out")?
+                .context("failed to spawn yt-dlp")?
+        } else {
+            output
+        };
 
         if !output.status.success() {
             return Ok(None);
@@ -214,17 +234,12 @@ impl Ytdlp {
         let json: Value =
             serde_json::from_slice(&output.stdout).context("yt-dlp produced invalid JSON")?;
 
-        // 1. Try 'profile_image'
         if let Some(url) = json.get("profile_image").and_then(|v| v.as_str()) {
             return Ok(Some(url.to_string()));
         }
-
-        // 2. Try 'thumbnail'
         if let Some(url) = json.get("thumbnail").and_then(|v| v.as_str()) {
             return Ok(Some(url.to_string()));
         }
-
-        // 3. Try 'thumbnails' array with id="avatar"
         if let Some(arr) = json.get("thumbnails").and_then(|v| v.as_array()) {
             for t in arr {
                 if t.get("id").and_then(|v| v.as_str()) == Some("avatar") {
@@ -234,7 +249,6 @@ impl Ytdlp {
                 }
             }
         }
-
         Ok(None)
     }
 

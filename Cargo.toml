@@ -24,6 +24,7 @@ base64 = "0.23"
 yt-dlp = "2"
 which = "8"
 toml_edit = "0.25"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "avif"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
