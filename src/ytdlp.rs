@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use chrono::DateTime;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
@@ -188,68 +188,58 @@ impl Ytdlp {
         }
     }
 
-    async fn fetch_twitch_avatar(&self, channel_url: &str) -> Result<Option<String>> {
-        let base_url = channel_url
-            .split("/videos")
-            .next()
-            .unwrap_or(channel_url)
-            .trim_end_matches('/');
+    /// Uses Twitch's GraphQL API to fetch the highest quality avatar and banner.
+    async fn fetch_twitch_images(
+        &self,
+        channel_name: &str,
+    ) -> Result<(Option<String>, Option<String>)> {
+        let client = reqwest::Client::new();
 
-        // FIX: Use /about to force the twitch:channel extractor, otherwise yt-dlp
-        // treats the URL as a stream and fails if it's offline.
-        let about_url = format!("{}/about", base_url);
-
-        let mut cmd = Command::new(&self.binary);
-        self.configure_command(&mut cmd);
-
-        cmd.arg("-J").arg("--no-warnings").arg("--no-playlist");
-        add_rate_limit_args(&mut cmd);
-        cmd.args(&self.extra_args).arg("--").arg(&about_url);
-
-        let output = tokio::time::timeout(LIST_TIMEOUT, cmd.output())
-            .await
-            .context("yt-dlp avatar fetch timed out")?
-            .context("failed to spawn yt-dlp")?;
-
-        // Fallback to base URL just in case the channel is currently live
-        let output = if !output.status.success() {
-            let mut cmd2 = Command::new(&self.binary);
-            self.configure_command(&mut cmd2);
-            cmd2.arg("-J").arg("--no-warnings").arg("--no-playlist");
-            add_rate_limit_args(&mut cmd2);
-            cmd2.args(&self.extra_args).arg("--").arg(&base_url);
-
-            tokio::time::timeout(LIST_TIMEOUT, cmd2.output())
-                .await
-                .context("yt-dlp avatar fallback fetch timed out")?
-                .context("failed to spawn yt-dlp")?
-        } else {
-            output
-        };
-
-        if !output.status.success() {
-            return Ok(None);
-        }
-
-        let json: Value =
-            serde_json::from_slice(&output.stdout).context("yt-dlp produced invalid JSON")?;
-
-        if let Some(url) = json.get("profile_image").and_then(|v| v.as_str()) {
-            return Ok(Some(url.to_string()));
-        }
-        if let Some(url) = json.get("thumbnail").and_then(|v| v.as_str()) {
-            return Ok(Some(url.to_string()));
-        }
-        if let Some(arr) = json.get("thumbnails").and_then(|v| v.as_array()) {
-            for t in arr {
-                if t.get("id").and_then(|v| v.as_str()) == Some("avatar") {
-                    if let Some(url) = t.get("url").and_then(|v| v.as_str()) {
-                        return Ok(Some(url.to_string()));
-                    }
+        // This is the exact query and hash the Python ytdlp2STRM script uses.
+        let payload = json!([{
+            "operationName": "ChannelShell",
+            "variables": { "login": channel_name },
+            "extensions": {
+                "persistedQuery": {
+                    "version": 1,
+                    "sha256Hash": "580ab410bcd0c1ad194224957ae2241e5d252b2c5173d8e0cce9d32d5bb14efe"
                 }
             }
+        }]);
+
+        let resp = client
+            .post("https://gql.twitch.tv/gql")
+            .header("Client-Id", "kimne78kx3ncx6brgo4mv6wki5h1ko")
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await;
+
+        if let Ok(resp) = resp {
+            if let Ok(json) = resp.json::<Value>().await {
+                let user = &json[0]["data"]["userOrError"];
+
+                let mut avatar = user["profileImageURL"].as_str().map(|s| s.to_string());
+                let mut banner = user["bannerImageURL"].as_str().map(|s| s.to_string());
+
+                // Twitch avatars default to 70x70 or 300x300.
+                // We string-replace to 600x600 to get the absolute maximum resolution.
+                if let Some(a) = &avatar {
+                    avatar = Some(a.replace("70x70", "600x600").replace("300x300", "600x600"));
+                }
+
+                // If there's no banner, don't use the generic fallback URL Twitch provides
+                if let Some(b) = &banner {
+                    if b.contains("no_banner") {
+                        banner = None;
+                    }
+                }
+
+                return Ok((avatar, banner));
+            }
         }
-        Ok(None)
+
+        Ok((None, None))
     }
 
     pub async fn list_channel(&self, channel_url: &str, limit: usize) -> Result<ChannelInfo> {
@@ -288,9 +278,50 @@ impl Ytdlp {
 
         let is_twitch = channel_url.contains("twitch.tv");
 
+        let name = if is_twitch {
+            let from_json = json
+                .get("playlist_channel")
+                .and_then(|v| v.as_str())
+                .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
+                .or_else(|| json.get("channel").and_then(|v| v.as_str()))
+                .or_else(|| json.get("id").and_then(|v| v.as_str()));
+
+            if let Some(n) = from_json {
+                n.to_string()
+            } else {
+                let clean_url = channel_url.split('?').next().unwrap_or(channel_url);
+                let parts: Vec<&str> = clean_url.split('/').filter(|s| !s.is_empty()).collect();
+                if parts.len() >= 2 {
+                    let candidate = parts[1];
+                    if candidate != "videos" && !candidate.starts_with('v') {
+                        candidate.to_string()
+                    } else {
+                        "Unknown Twitch Channel".to_string()
+                    }
+                } else {
+                    "Unknown Twitch Channel".to_string()
+                }
+            }
+        } else if channel_url.contains("/playlist?") || channel_url.contains("/playlist/") {
+            json.get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown")
+                .to_string()
+        } else {
+            json.get("channel")
+                .and_then(|v| v.as_str())
+                .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
+                .or_else(|| json.get("title").and_then(|v| v.as_str()))
+                .unwrap_or("Unknown")
+                .to_string()
+        };
+
         let (mut thumbnail_url, banner_url) = if is_twitch {
-            let avatar = self.fetch_twitch_avatar(channel_url).await.unwrap_or(None);
-            (avatar, None)
+            let (avatar, banner) = self
+                .fetch_twitch_images(&name)
+                .await
+                .unwrap_or((None, None));
+            (avatar, banner)
         } else {
             let mut image_source_url = normalized.clone();
             if typ == "playlist" {
@@ -336,47 +367,6 @@ impl Ytdlp {
             }
         }
 
-        let is_user_playlist =
-            channel_url.contains("/playlist?") || channel_url.contains("/playlist/");
-
-        let name = if is_twitch {
-            let from_json = json
-                .get("playlist_channel")
-                .and_then(|v| v.as_str())
-                .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
-                .or_else(|| json.get("channel").and_then(|v| v.as_str()))
-                .or_else(|| json.get("id").and_then(|v| v.as_str()));
-
-            if let Some(n) = from_json {
-                n.to_string()
-            } else {
-                let clean_url = channel_url.split('?').next().unwrap_or(channel_url);
-                let parts: Vec<&str> = clean_url.split('/').filter(|s| !s.is_empty()).collect();
-                if parts.len() >= 2 {
-                    let candidate = parts[1];
-                    if candidate != "videos" && !candidate.starts_with('v') {
-                        candidate.to_string()
-                    } else {
-                        "Unknown Twitch Channel".to_string()
-                    }
-                } else {
-                    "Unknown Twitch Channel".to_string()
-                }
-            }
-        } else if is_user_playlist {
-            json.get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Unknown")
-                .to_string()
-        } else {
-            json.get("channel")
-                .and_then(|v| v.as_str())
-                .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
-                .or_else(|| json.get("title").and_then(|v| v.as_str()))
-                .unwrap_or("Unknown")
-                .to_string()
-        };
-
         let channel_id = json
             .get("channel_id")
             .and_then(|v| v.as_str())
@@ -405,8 +395,7 @@ impl Ytdlp {
                             .unwrap_or(&id)
                             .to_string();
 
-                        // FIX: Look for BOTH 'thumbnails' (YouTube) and 'thumbnail' (Twitch)
-                        let thumbnail_url = e
+                        let mut thumbnail_url = e
                             .get("thumbnails")
                             .and_then(|v| v.as_array())
                             .and_then(|arr| best_thumbnail(arr))
@@ -415,6 +404,13 @@ impl Ytdlp {
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string())
                             });
+
+                        // UPGRADE VOD THUMBNAIL: Twitch returns 320x180 by default, replace with 1280x720
+                        if let Some(t) = &thumbnail_url {
+                            if t.contains("thumb0-320x180.jpg") {
+                                thumbnail_url = Some(t.replace("320x180", "1280x720"));
+                            }
+                        }
 
                         let duration_secs = e.get("duration").and_then(|v| v.as_u64());
 
