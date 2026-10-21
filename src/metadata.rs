@@ -12,7 +12,7 @@ pub struct VideoMetadata {
     pub duration_secs: Option<u64>,
 }
 
-fn from_entry(entry: &ChannelEntry) -> VideoMetadata {
+pub fn from_entry(entry: &ChannelEntry) -> VideoMetadata {
     VideoMetadata {
         title: entry.title.clone(),
         description: entry.description.clone(),
@@ -45,26 +45,21 @@ pub fn metadata_from_json(json: &Value) -> VideoMetadata {
     }
 }
 
-pub async fn get_video_metadata(state: &AppState, entry: &ChannelEntry) -> VideoMetadata {
+pub async fn get_video_metadata(
+    state: &AppState,
+    entry: &ChannelEntry,
+) -> anyhow::Result<VideoMetadata> {
     let cfg = state.config();
     if cfg.metadata.metadata_level == MetadataLevel::Full {
-        match state
+        // Propagate the error so `scan.rs` can decide whether to skip
+        // (age-restricted / deleted / private) or abort (rate limit).
+        let json = state
             .resolve_cache
             .get_or_resolve(&state.ytdlp, &entry.id)
-            .await
-        {
-            Ok(json) => metadata_from_json(&json),
-            Err(e) => {
-                tracing::warn!(
-                    video_id = %entry.id,
-                    error = %e,
-                    "full metadata resolve failed, using basic metadata"
-                );
-                from_entry(entry)
-            }
-        }
+            .await?;
+        Ok(metadata_from_json(&json))
     } else {
-        from_entry(entry)
+        Ok(from_entry(entry))
     }
 }
 
@@ -117,7 +112,7 @@ pub fn build_tvshow_nfo(
     description: Option<&str>,
     channel_id: Option<&str>,
     thumb_filename: Option<&str>,
-    fanart_filename: Option<&str>, // <-- NEW
+    fanart_filename: Option<&str>,
 ) -> String {
     let mut out = String::new();
     out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n");
@@ -136,7 +131,7 @@ pub fn build_tvshow_nfo(
         out.push_str(&format!("  <thumb>{}</thumb>\n", xml_escape(thumb)));
     }
     if let Some(fanart) = fanart_filename {
-        out.push_str(&format!("  <fanart>{}</fanart>\n", xml_escape(fanart))); // <-- NEW
+        out.push_str(&format!("  <fanart>{}</fanart>\n", xml_escape(fanart)));
     }
     out.push_str("</tvshow>\n");
     out

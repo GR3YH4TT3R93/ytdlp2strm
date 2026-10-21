@@ -2,7 +2,9 @@ use crate::config::StrmMode;
 use crate::downloads;
 use crate::files::{StrmOutcome, sanitize_filename, scan_existing_files, write_strm_file};
 use crate::images::{cleanup_image_variants, download_image, find_existing_image};
-use crate::metadata::{build_episode_nfo, build_tvshow_nfo, get_video_metadata, xml_escape};
+use crate::metadata::{
+    build_episode_nfo, build_tvshow_nfo, from_entry, get_video_metadata, xml_escape,
+};
 use crate::state::AppState;
 use crate::ytdlp::ChannelInfo;
 use anyhow::Context;
@@ -444,9 +446,37 @@ async fn run_scan_inner(
 
         // 2. If we couldn't get the date, call yt-dlp
         if date.is_none() {
-            let meta = get_video_metadata(state, entry).await;
-            date = parse_date(meta.upload_date.as_deref());
-            cached_meta = Some(meta);
+            match get_video_metadata(state, entry).await {
+                Ok(meta) => {
+                    date = parse_date(meta.upload_date.as_deref());
+                    cached_meta = Some(meta);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+
+                    // If it's a known permanent failure, skip this video and continue.
+                    if msg.contains("Sign in to confirm your age")
+                        || msg.contains("Video unavailable")
+                        || msg.contains("Private video")
+                        || msg.contains("has been removed")
+                    {
+                        tracing::warn!(
+                            video_id = %entry.id,
+                            "Skipping permanent failure (age/private/unavailable): {}",
+                            entry.title
+                        );
+                        continue; // Skip this video entirely
+                    }
+
+                    // Anything else (rate limit, network timeout) aborts the scan
+                    return Err(anyhow::anyhow!(
+                        "no upload date for video {} ({}): {}. Aborting scan.",
+                        entry.id,
+                        entry.title,
+                        msg
+                    ));
+                }
+            }
         }
 
         // Bail immediately if we still don't have a date. Continuing would
@@ -626,7 +656,9 @@ async fn run_scan_inner(
                 }
                 let meta = match cached_meta {
                     Some(m) => m,
-                    None => get_video_metadata(state, entry).await,
+                    None => get_video_metadata(state, entry)
+                        .await
+                        .unwrap_or_else(|_| from_entry(entry)),
                 };
                 let nfo_content =
                     build_episode_nfo(&meta, season, episode, &entry.id, thumb_filename.as_deref());
