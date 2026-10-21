@@ -146,10 +146,7 @@ impl Ytdlp {
     pub async fn list_channel(&self, channel_url: &str, limit: usize) -> Result<ChannelInfo> {
         let normalized = normalize_playlist_url(channel_url);
 
-        // 1. Get high-res images via --list-thumbnails (Exact Python behavior)
-        let (thumbnail_url, banner_url) = self.get_channel_images(&normalized).await?;
-
-        // 2. Get the flat playlist JSON
+        // 1. Get the flat playlist JSON FIRST so we know the actual channel URL
         let mut cmd = Command::new(&self.binary);
         self.configure_command(&mut cmd);
 
@@ -182,13 +179,42 @@ impl Ytdlp {
             bail!("URL is not a channel or playlist (got _type={typ:?})");
         }
 
-        let name = json
-            .get("channel")
-            .and_then(|v| v.as_str())
-            .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
-            .or_else(|| json.get("title").and_then(|v| v.as_str()))
-            .unwrap_or("Unknown")
-            .to_string();
+        // 2. Determine the channel URL to fetch the avatar/banner from
+        let mut image_source_url = normalized.clone();
+        if typ == "playlist" {
+            if let Some(ch_url) = json.get("channel_url").and_then(|v| v.as_str()) {
+                image_source_url = ch_url.to_string();
+            } else if let Some(uploader_id) = json.get("uploader_id").and_then(|v| v.as_str()) {
+                image_source_url = format!("https://www.youtube.com/channel/{}", uploader_id);
+            } else if let Some(ch_id) = json.get("channel_id").and_then(|v| v.as_str()) {
+                image_source_url = format!("https://www.youtube.com/channel/{}", ch_id);
+            }
+        }
+
+        // 3. Get high-res channel images using the resolved channel URL
+        let (mut thumbnail_url, banner_url) = self.get_channel_images(&image_source_url).await?;
+
+        // 4. Fallback: If channel images fail (e.g. Mix playlists), use the playlist/video thumbnail
+        if thumbnail_url.is_none() {
+            thumbnail_url = json
+                .get("thumbnails")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| best_thumbnail(arr));
+        }
+
+        // 5. Use the playlist title if it's a playlist, otherwise fall back to channel name
+        let name = if typ == "playlist" {
+            json.get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown")
+        } else {
+            json.get("channel")
+                .and_then(|v| v.as_str())
+                .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
+                .or_else(|| json.get("title").and_then(|v| v.as_str()))
+                .unwrap_or("Unknown")
+        }
+        .to_string();
 
         let channel_id = json
             .get("channel_id")
