@@ -33,8 +33,10 @@ impl StreamKind {
                         && f.get("vcodec")
                             .and_then(|v| v.as_str())
                             .is_some_and(|v| v != "none")
-                        // Allow muxed streams for Twitch, but force video-only for YouTube
-                        && (is_twitch || f.get("acodec").and_then(|v| v.as_str()).is_none_or(|a| a == "none"))
+                        && (is_twitch
+                            || f.get("acodec")
+                                .and_then(|v| v.as_str())
+                                .is_none_or(|a| a == "none"))
                 }
                 StreamKind::Audio => {
                     is_hls(f) && f.get("vcodec").and_then(|v| v.as_str()) == Some("none")
@@ -49,21 +51,52 @@ impl StreamKind {
                 let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("");
 
                 let is_video_only = (acodec == "none") as u64;
-                // Force H.264 over VP9 for maximum Android compatibility
                 let is_h264 = vcodec.starts_with("avc") as u64;
                 (is_video_only, is_h264, h)
             }
             StreamKind::Audio => {
                 let fid = f.get("format_id").and_then(|v| v.as_str()).unwrap_or("");
                 let abr = f.get("abr").and_then(|v| v.as_f64()).unwrap_or(0.0) as u64;
-                // FIX: Explicitly prioritize AAC (140, 234) over Opus (251, 233)
-                // so it works in MPEG-TS containers on Android.
-                let is_aac = (fid == "140" || fid == "234") as u64;
+                let is_aac = (fid.starts_with("140") || fid == "234") as u64;
                 (is_aac, abr, 0)
             }
         });
 
         candidates.pop()
+    }
+
+    fn all_audio<'a>(json: &'a Value) -> Vec<&'a Value> {
+        let mut tracks = Vec::new();
+        if let Some(formats) = json.get("formats").and_then(|f| f.as_array()) {
+            for f in formats {
+                if is_hls(f) && f.get("vcodec").and_then(|v| v.as_str()) == Some("none") {
+                    tracks.push(f);
+                }
+            }
+        }
+
+        tracks.sort_by_key(|f| {
+            let fid = f.get("format_id").and_then(|v| v.as_str()).unwrap_or("");
+            let abr = f.get("abr").and_then(|v| v.as_f64()).unwrap_or(0.0) as u64;
+            let is_aac = (fid.starts_with("140") || fid == "234") as u64;
+            (is_aac, abr)
+        });
+        tracks.reverse();
+
+        let mut unique = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for t in tracks {
+            let lang = t.get("language").and_then(|v| v.as_str()).unwrap_or("und");
+            let note = t
+                .get("format_note")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Default");
+            let key = format!("{}:{}", lang, note);
+            if seen.insert(key) {
+                unique.push(t);
+            }
+        }
+        unique
     }
 }
 
@@ -234,6 +267,21 @@ async fn build_master_body(
     let body = if is_muxed {
         // Twitch (muxed video + audio)
         let codecs = format!(",CODECS=\"{},{}\"", vcodec, acodec);
+
+        // Background prefetch for Twitch video
+        let state_clone = state.clone();
+        let video_id_clone = video_id.to_string();
+        let v_fmt = video_format_id.clone();
+        tokio::spawn(async move {
+            let _ = build_filtered_playlist(
+                &state_clone,
+                &video_id_clone,
+                StreamKind::Video,
+                Some(&v_fmt),
+            )
+            .await;
+        });
+
         format!(
             "#EXTM3U\n\
              #EXT-X-VERSION:3\n\
@@ -242,35 +290,87 @@ async fn build_master_body(
         )
     } else {
         // YouTube (separate audio/video streams)
-        let audio_fmt = StreamKind::Audio
-            .best(&json, is_twitch)
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "no HLS audio format".to_string()))?;
-        let audio_format_id = audio_fmt
-            .get("format_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let audio_tracks = StreamKind::all_audio(&json);
+        let mut media_lines = Vec::new();
 
-        // FIX: Map the codec correctly based on the selected ID
-        let acodec_out = if audio_format_id == "251" || audio_format_id == "233" {
-            "opus"
-        } else {
-            "mp4a.40.2"
-        };
+        let mut default_audio_codec = "mp4a.40.2";
+
+        for (i, track) in audio_tracks.iter().enumerate() {
+            let fmt_id = track
+                .get("format_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let lang = track
+                .get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("und");
+            let note = track
+                .get("format_note")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let name = if note.is_empty() || note == "medium" {
+                format!("Track {} ({})", i + 1, lang)
+            } else {
+                note.to_string()
+            };
+
+            let is_default = if i == 0 { "YES" } else { "NO" };
+            let is_opus = fmt_id == "251" || fmt_id == "233" || fmt_id.contains("opus");
+            let track_codec = if is_opus { "opus" } else { "mp4a.40.2" };
+
+            if i == 0 {
+                default_audio_codec = track_codec;
+            }
+
+            media_lines.push(format!(
+                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"{}\",LANGUAGE=\"{}\",DEFAULT={},AUTOSELECT=YES,URI=\"{base}/audio.m3u8?fmt={}\"",
+                name, lang, is_default, fmt_id
+            ));
+
+            // ASYNC PREFETCH: Spawn a task to fetch EVERY audio track immediately
+            let state_audio = state.clone();
+            let video_id_audio = video_id.to_string();
+            let a_fmt = fmt_id.to_string();
+            tokio::spawn(async move {
+                let _ = build_filtered_playlist(
+                    &state_audio,
+                    &video_id_audio,
+                    StreamKind::Audio,
+                    Some(&a_fmt),
+                )
+                .await;
+            });
+        }
+
+        // Background prefetch for YouTube video
+        let state_clone = state.clone();
+        let video_id_clone = video_id.to_string();
+        let v_fmt = video_format_id.clone();
+        tokio::spawn(async move {
+            let _ = build_filtered_playlist(
+                &state_clone,
+                &video_id_clone,
+                StreamKind::Video,
+                Some(&v_fmt),
+            )
+            .await;
+        });
 
         let mut codec_parts = Vec::new();
         if !vcodec.is_empty() {
             codec_parts.push(vcodec);
         }
-        codec_parts.push(acodec_out);
+        codec_parts.push(default_audio_codec);
         let codecs = format!(",CODECS=\"{}\"", codec_parts.join(","));
 
         format!(
             "#EXTM3U\n\
              #EXT-X-VERSION:3\n\
-             #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"main\",DEFAULT=YES,AUTOSELECT=YES,URI=\"{base}/audio.m3u8?fmt={audio_format_id}\"\n\
+             {}\n\
              #EXT-X-STREAM-INF:BANDWIDTH={bandwidth}{resolution}{codecs},AUDIO=\"aud\"\n\
-             {base}/video.m3u8?fmt={video_format_id}\n"
+             {base}/video.m3u8?fmt={video_format_id}\n",
+            media_lines.join("\n")
         )
     };
 
