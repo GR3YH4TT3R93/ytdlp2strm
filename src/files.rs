@@ -40,35 +40,58 @@ pub struct ExistingFiles {
 
 pub async fn scan_existing_files(dir: &Path) -> ExistingFiles {
     let mut result = ExistingFiles::default();
-    let mut rd = match fs::read_dir(dir).await {
-        Ok(rd) => rd,
-        Err(_) => return result,
-    };
-    while let Ok(Some(entry)) = rd.next_entry().await {
-        let path = entry.path();
-        let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+
+    // Walk the channel root AND every subdirectory (Season folders).
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(mut rd) = fs::read_dir(&current).await else {
             continue;
         };
-        if let Some(stem) = name.strip_suffix(".strm") {
-            if let Ok(content) = fs::read_to_string(&path).await {
-                let content = content.trim();
-                if let Some(id) = content.split('/').last() {
-                    if !id.is_empty() {
-                        let id = id.to_string();
-                        result.strms.insert(id.clone(), path);
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type().await else {
+                continue;
+            };
 
-                        let nfo_path = dir.join(format!("{stem}.nfo"));
-                        if nfo_path.exists() {
-                            result.nfos.insert(id.clone(), nfo_path);
-                        }
+            if ft.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !ft.is_file() {
+                continue;
+            }
 
-                        for ext in IMAGE_EXTS {
-                            let thumb_path = dir.join(format!("{stem}-thumb.{ext}"));
-                            if thumb_path.exists() {
-                                result.thumbs.insert(id.clone(), thumb_path);
-                                break;
-                            }
-                        }
+            let Some(name) = entry.file_name().to_str().map(|s| s.to_string()) else {
+                continue;
+            };
+
+            // Skip channel-level files that are not video assets.
+            if name == "tvshow.nfo" || name == "season.nfo" {
+                continue;
+            }
+            if name.starts_with("poster") || name.starts_with("fanart") {
+                continue;
+            }
+
+            if let Some(stem) = name.strip_suffix(".strm")
+                && let Ok(content) = fs::read_to_string(&path).await
+                && let Some(id) = content.trim().split('/').next_back()
+                && !id.is_empty()
+            {
+                let id = id.to_string();
+                result.strms.insert(id.clone(), path.clone());
+
+                // NFO and thumbnail live alongside the STRM.
+                let nfo_path = current.join(format!("{stem}.nfo"));
+                if nfo_path.exists() {
+                    result.nfos.insert(id.clone(), nfo_path);
+                }
+
+                for ext in IMAGE_EXTS {
+                    let thumb_path = current.join(format!("{stem}-thumb.{ext}"));
+                    if thumb_path.exists() {
+                        result.thumbs.insert(id, thumb_path);
+                        break;
                     }
                 }
             }
