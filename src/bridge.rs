@@ -297,15 +297,16 @@ async fn build_master_body(
         .unwrap_or("none");
     let is_muxed = acodec != "none";
 
-    // Cap the reported bandwidth at 15 Mbps.
+    // Cap the reported bandwidth at 5 Mbps.
     // If YouTube reports an insane bitrate (e.g., 200 Mbps), Jellyfin will
     // force a transcode. By capping it, we tell Jellyfin "this is totally safe to Direct Play".
     let bandwidth = video_fmt
         .get("tbr")
         .and_then(|x| x.as_f64())
         .map(|tbr| (tbr * 1000.0) as u64)
-        .filter(|b| *b > 0 && *b < 20_000_000) // Ignore insane bitrates
-        .unwrap_or(55_000_000); // Default to 55 Mbps
+        .filter(|b| *b > 0)
+        .unwrap_or(5_000_000);
+
     let resolution = if width > 0 && height > 0 {
         format!(",RESOLUTION={width}x{height}")
     } else {
