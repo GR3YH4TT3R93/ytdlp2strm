@@ -2,9 +2,7 @@ use crate::config::StrmMode;
 use crate::downloads;
 use crate::files::{StrmOutcome, sanitize_filename, scan_existing_files, write_strm_file};
 use crate::images::{cleanup_image_variants, download_image, find_existing_image};
-use crate::metadata::{
-    build_episode_nfo, build_tvshow_nfo, from_entry, get_video_metadata,
-};
+use crate::metadata::{build_episode_nfo, build_tvshow_nfo, from_entry, get_video_metadata};
 use crate::state::AppState;
 use crate::ytdlp::ChannelInfo;
 use anyhow::Context;
@@ -20,12 +18,13 @@ use std::time::Instant;
 fn emit_log(logs: Option<&Arc<Mutex<Vec<String>>>>, msg: String) {
     println!("{msg}");
     if let Some(logs) = logs
-        && let Ok(mut l) = logs.lock() {
-            l.push(msg);
-            if l.len() > 200 {
-                l.remove(0);
-            }
+        && let Ok(mut l) = logs.lock()
+    {
+        l.push(msg);
+        if l.len() > 200 {
+            l.remove(0);
         }
+    }
 }
 
 fn parse_date(date_opt: Option<&str>) -> Option<(i32, i32)> {
@@ -314,13 +313,41 @@ async fn run_scan_inner(
         StrmMode::Direct => "direct",
     };
 
-    let channel_dir = cfg.strm.output_dir.join(sanitize_filename(&info.name));
+    // --- Platform-specific Directory ---
+    let is_twitch = url.to_lowercase().contains("twitch.tv");
+    let platform_dir = if is_twitch {
+        let base_dir = cfg.strm.output_dir.parent().unwrap_or(&cfg.strm.output_dir);
+        base_dir.join("twitch")
+    } else {
+        cfg.strm.output_dir.clone()
+    };
+
+    tokio::fs::create_dir_all(&platform_dir)
+        .await
+        .with_context(|| format!("mkdir {}", platform_dir.display()))?;
+
+    // Case-insensitive check for existing channel folder (e.g., "smii7y" -> "SMii7Y")
+    let target_name = sanitize_filename(&info.name);
+    let mut actual_name = target_name.clone();
+
+    if let Ok(mut entries) = tokio::fs::read_dir(&platform_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if let Some(existing_name) = entry.file_name().to_str() {
+                if existing_name.eq_ignore_ascii_case(&target_name) {
+                    actual_name = existing_name.to_string();
+                    break;
+                }
+            }
+        }
+    }
+
+    let channel_dir = platform_dir.join(actual_name);
     tokio::fs::create_dir_all(&channel_dir)
         .await
         .with_context(|| format!("mkdir {}", channel_dir.display()))?;
 
     // --- Twitch Live Check ---
-    if url.to_lowercase().contains("twitch.tv") && !url.contains("/videos/") {
+    if is_twitch && !url.contains("/videos/") {
         emit_log(logs, "Checking Twitch live status...".to_string());
         if let Ok(Some(live_info)) = state.ytdlp.check_twitch_live(url).await {
             emit_log(logs, format!("Channel is LIVE: {}", live_info.title));
@@ -415,15 +442,17 @@ async fn run_scan_inner(
         let mut cached_meta = None;
         let mut existing_nfo_content = None;
 
-        if !force && let Some(nfo_path) = existing.nfos.get(&entry.id)
-            && let Ok(content) = tokio::fs::read_to_string(nfo_path).await {
-                let meta = crate::metadata::from_nfo(&content);
-                if let Some(d) = meta.upload_date.as_deref() {
-                    date = parse_date(Some(d));
-                }
-                cached_meta = Some(meta);
-                existing_nfo_content = Some(content);
+        if !force
+            && let Some(nfo_path) = existing.nfos.get(&entry.id)
+            && let Ok(content) = tokio::fs::read_to_string(nfo_path).await
+        {
+            let meta = crate::metadata::from_nfo(&content);
+            if let Some(d) = meta.upload_date.as_deref() {
+                date = parse_date(Some(d));
             }
+            cached_meta = Some(meta);
+            existing_nfo_content = Some(content);
+        }
 
         // 2. If we couldn't get the date from the NFO, call yt-dlp (slow)
         if date.is_none() {
@@ -511,9 +540,10 @@ async fn run_scan_inner(
             strm_skipped += 1;
         } else {
             if let Some(old_path) = existing.strms.get(&entry.id)
-                && old_path != &new_strm_path {
-                    let _ = tokio::fs::remove_file(old_path).await;
-                }
+                && old_path != &new_strm_path
+            {
+                let _ = tokio::fs::remove_file(old_path).await;
+            }
             match write_strm_file(&season_dir, &entry.id, &entry.title, &play_url, force).await {
                 Ok(outcome) => {
                     if matches!(outcome, StrmOutcome::Written(_)) {
@@ -561,9 +591,10 @@ async fn run_scan_inner(
                             .thumbnails_written
                             .fetch_add(1, Ordering::Relaxed);
                         if let Some(old) = &old_thumb
-                            && old != &final_path {
-                                let _ = tokio::fs::remove_file(old).await;
-                            }
+                            && old != &final_path
+                        {
+                            let _ = tokio::fs::remove_file(old).await;
+                        }
                         cleanup_image_variants(&base_path, &final_path).await;
                     }
                     Err(e) => {
@@ -617,10 +648,9 @@ async fn run_scan_inner(
             if !needs_write {
                 nfo_skipped += 1;
             } else {
-                if should_move
-                    && let Some(old_path) = existing.nfos.get(&entry.id) {
-                        let _ = tokio::fs::remove_file(old_path).await;
-                    }
+                if should_move && let Some(old_path) = existing.nfos.get(&entry.id) {
+                    let _ = tokio::fs::remove_file(old_path).await;
+                }
                 match tokio::fs::write(&new_nfo_path, nfo_content).await {
                     Ok(_) => {
                         nfo_written += 1;
@@ -703,10 +733,11 @@ async fn run_scan_inner(
             if let Ok(mut sub) = tokio::fs::read_dir(entry.path()).await {
                 while let Ok(Some(sf)) = sub.next_entry().await {
                     if let Some(fname) = sf.file_name().to_str()
-                        && fname != "season.nfo" {
-                            has_media = true;
-                            break;
-                        }
+                        && fname != "season.nfo"
+                    {
+                        has_media = true;
+                        break;
+                    }
                 }
             }
             if !has_media {
